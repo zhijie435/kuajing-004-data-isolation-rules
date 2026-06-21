@@ -1,5 +1,5 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElNotification } from 'element-plus'
 import router from '@/router'
 import { useTenantStore } from '@/stores/tenant'
 import { useUserStore } from '@/stores/user'
@@ -11,6 +11,40 @@ const service: AxiosInstance = axios.create({
     'Content-Type': 'application/json'
   }
 })
+
+const ERROR_CODE_MAP: Record<string, { title: string; type: 'error' | 'warning' | 'info' }> = {
+  UNAUTHORIZED: { title: '登录失效', type: 'warning' },
+  FORBIDDEN: { title: '权限不足', type: 'warning' },
+  NOT_FOUND: { title: '资源不存在', type: 'warning' },
+  VALIDATION_ERROR: { title: '参数错误', type: 'warning' },
+  SERVER_ERROR: { title: '服务器错误', type: 'error' }
+}
+
+function showStructuredError(status: number, data: any, fallbackMessage: string) {
+  const errorCode = data?.error_code || 'SERVER_ERROR'
+  const mapped = ERROR_CODE_MAP[errorCode] || { title: '操作失败', type: 'error' as const }
+  const message = data?.message || fallbackMessage
+
+  if (status === 403) {
+    const contextTip = data?.context
+      ? `\n详细信息：${JSON.stringify(data.context)}`
+      : ''
+    ElNotification({
+      type: mapped.type,
+      title: mapped.title,
+      message: `${message}${contextTip}`,
+      duration: 5000,
+      showClose: true
+    })
+  } else {
+    ElMessage({
+      type: mapped.type,
+      message: message,
+      showClose: true,
+      duration: 3000
+    })
+  }
+}
 
 service.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
@@ -37,7 +71,7 @@ service.interceptors.response.use(
     const res = response.data
 
     if (res.code !== 0 && res.code !== 200) {
-      ElMessage.error(res.message || '请求失败')
+      showStructuredError(response.status, res, res.message || '请求失败')
 
       if (res.code === 401) {
         const userStore = useUserStore()
@@ -52,19 +86,21 @@ service.interceptors.response.use(
   },
   (error) => {
     const status = error.response?.status
-    const message = error.response?.data?.message || error.message
+    const data = error.response?.data
 
     if (status === 401) {
-      ElMessage.error('登录已过期，请重新登录')
+      showStructuredError(401, data, '登录已过期，请重新登录')
       const userStore = useUserStore()
       userStore.logout()
       router.push('/login')
     } else if (status === 403) {
-      ElMessage.error(message || '无权访问该资源')
+      showStructuredError(403, data, '无权访问该资源')
     } else if (status === 404) {
-      ElMessage.error('请求资源不存在')
+      showStructuredError(404, data, '请求资源不存在')
+    } else if (status === 400) {
+      showStructuredError(400, data, '请求参数错误')
     } else {
-      ElMessage.error(message || '网络错误')
+      showStructuredError(status || 500, data, error.message || '网络错误')
     }
 
     return Promise.reject(error)

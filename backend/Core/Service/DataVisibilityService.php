@@ -5,6 +5,7 @@ namespace App\Core\Service;
 use App\Core\Context\TenantContext;
 use App\Core\Enum\DataScopeLevel;
 use App\Core\Enum\RoleType;
+use App\Core\Exception\ForbiddenException;
 
 class DataVisibilityService
 {
@@ -46,7 +47,11 @@ class DataVisibilityService
         }
 
         if (!$allowed) {
-            throw new \RuntimeException('无权切换到该数据可见范围: ' . $target->label());
+            throw (new ForbiddenException('无权切换到该数据可见范围：' . $target->label()))
+                ->setContext([
+                    'target_scope' => $target->value,
+                    'available_scopes' => array_map(fn($s) => $s->value, $available),
+                ]);
         }
 
         $this->context->setDataScope($target);
@@ -128,14 +133,28 @@ class DataVisibilityService
     public function assertCanView(array $resource, string $resourceName = '资源'): void
     {
         if (!$this->canViewResource($resource)) {
-            throw new \RuntimeException("无权查看该{$resourceName}");
+            $ctx = $this->context;
+            throw (new ForbiddenException("无权查看该{$resourceName}：当前数据可见范围为「{$ctx->getDataScope()->label()}」"))
+                ->setContext([
+                    'resource_owner_id' => $resource['owner_id'] ?? $resource['created_by'] ?? null,
+                    'resource_tenant_id' => $resource['tenant_id'] ?? null,
+                    'current_user_id' => $ctx->getUserId(),
+                    'current_role' => $ctx->getRole()?->value,
+                    'current_scope' => $ctx->getDataScope()->value,
+                ]);
         }
     }
 
     public function assertCanModify(array $resource, string $resourceName = '资源'): void
     {
         if (!$this->canModifyResource($resource)) {
-            throw new \RuntimeException("无权修改该{$resourceName}");
+            $ctx = $this->context;
+            throw (new ForbiddenException("无权修改该{$resourceName}：需为负责人或具备管理权限"))
+                ->setContext([
+                    'resource_owner_id' => $resource['owner_id'] ?? $resource['created_by'] ?? null,
+                    'current_user_id' => $ctx->getUserId(),
+                    'current_role' => $ctx->getRole()?->value,
+                ]);
         }
     }
 

@@ -106,30 +106,38 @@
         <el-table-column prop="created_at" label="创建时间" width="160" />
         <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              :disabled="!row._permissions?.can_view"
-              @click="viewCourse(row)"
+            <el-tooltip
+              v-if="!row._permissions?.can_view"
+              content="当前数据可见范围不足，无法查看"
+              placement="top"
             >
-              查看
-            </el-button>
-            <el-button
-              link
-              type="warning"
-              :disabled="!row._permissions?.can_edit"
-              @click="openEditDialog(row)"
+              <el-button link type="primary" disabled>查看</el-button>
+            </el-tooltip>
+            <el-tooltip v-else content="查看课程详情" placement="top">
+              <el-button link type="primary" @click="viewCourse(row)">查看</el-button>
+            </el-tooltip>
+
+            <el-tooltip
+              v-if="!row._permissions?.can_edit"
+              content="需为课程负责人或具备管理权限"
+              placement="top"
             >
-              编辑
-            </el-button>
-            <el-button
-              link
-              type="danger"
-              :disabled="!row._permissions?.can_delete"
-              @click="deleteCourse(row)"
+              <el-button link type="warning" disabled>编辑</el-button>
+            </el-tooltip>
+            <el-tooltip v-else content="编辑课程" placement="top">
+              <el-button link type="warning" @click="openEditDialog(row)">编辑</el-button>
+            </el-tooltip>
+
+            <el-tooltip
+              v-if="!row._permissions?.can_delete"
+              content="需为课程负责人或具备管理权限"
+              placement="top"
             >
-              删除
-            </el-button>
+              <el-button link type="danger" disabled>删除</el-button>
+            </el-tooltip>
+            <el-tooltip v-else content="删除课程" placement="top">
+              <el-button link type="danger" @click="deleteCourse(row)">删除</el-button>
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>
@@ -142,7 +150,13 @@
       :close-on-click-modal="false"
       @closed="onFormClosed"
     >
-      <el-form :model="courseForm" label-width="90px" ref="formRef" :rules="formRules">
+      <el-form
+        :model="courseForm"
+        label-width="90px"
+        ref="formRef"
+        :rules="formRules"
+        :disabled="submitting"
+      >
         <el-form-item label="课程名称" prop="title">
           <el-input v-model="courseForm.title" placeholder="请输入课程名称" />
         </el-form-item>
@@ -197,13 +211,20 @@
       </el-descriptions>
       <template #footer>
         <el-button @click="showDetail = false">关闭</el-button>
-        <el-button
-          v-if="detailCourse?._permissions?.can_edit"
-          type="primary"
-          @click="editFromDetail"
+        <el-tooltip
+          v-if="!detailCourse?._permissions?.can_edit"
+          content="需为课程负责人或具备管理权限"
+          placement="top"
         >
-          <el-icon><Edit /></el-icon> 编辑
-        </el-button>
+          <el-button type="primary" disabled>
+            <el-icon><Edit /></el-icon> 编辑
+          </el-button>
+        </el-tooltip>
+        <el-tooltip v-else content="编辑课程" placement="top">
+          <el-button type="primary" @click="editFromDetail">
+            <el-icon><Edit /></el-icon> 编辑
+          </el-button>
+        </el-tooltip>
       </template>
     </el-dialog>
 
@@ -268,6 +289,8 @@ const isEditMode = ref(false)
 const editingId = ref<number | null>(null)
 const detailCourse = ref<Course | null>(null)
 const formRef = ref<FormInstance>()
+
+const editingRow = ref<Course | null>(null)
 
 const courseForm = reactive({
   title: '',
@@ -338,8 +361,13 @@ function openCreateDialog() {
 }
 
 function openEditDialog(row: Course) {
+  if (!row._permissions?.can_edit) {
+    ElMessage.warning('无权限编辑该课程')
+    return
+  }
   isEditMode.value = true
   editingId.value = row.id
+  editingRow.value = row
   courseForm.title = row.title
   courseForm.category = row.category
   courseForm.status = row.status as 'draft' | 'published'
@@ -355,6 +383,14 @@ async function submitForm() {
   if (!formRef.value) return
   try {
     await formRef.value.validate()
+
+    if (isEditMode.value && editingRow.value && !editingRow.value._permissions?.can_edit) {
+      ElMessage.warning('您当前无权编辑此课程，权限可能已变更')
+      showCreate.value = false
+      await loadCourses()
+      return
+    }
+
     submitting.value = true
 
     if (isEditMode.value && editingId.value) {
@@ -369,7 +405,9 @@ async function submitForm() {
     await loadCourses()
     triggerRefresh()
   } catch (e: any) {
-    if (e?.message) ElMessage.error(e.message)
+    if (e?.message) {
+      ElMessage.error(e.message)
+    }
   } finally {
     submitting.value = false
   }
@@ -377,6 +415,10 @@ async function submitForm() {
 
 async function viewCourse(row: Course) {
   try {
+    if (!row._permissions?.can_view) {
+      ElMessage.warning('当前数据可见范围不足，无法查看该课程')
+      return
+    }
     const res: any = await courseApi.getById(row.id)
     detailCourse.value = res.data
     showDetail.value = true
@@ -395,6 +437,10 @@ function editFromDetail() {
 
 async function deleteCourse(row: Course) {
   try {
+    if (!row._permissions?.can_delete) {
+      ElMessage.warning('无权限删除该课程：需为课程负责人或具备管理权限')
+      return
+    }
     await ElMessageBox.confirm(`确认删除课程【${row.title}】？`, '提示', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -409,8 +455,9 @@ async function deleteCourse(row: Course) {
       showDetail.value = false
       detailCourse.value = null
     }
-  } catch (e) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e: any) {
+    if (e === 'cancel') return
+    if (e?.message) ElMessage.error(e.message)
   }
 }
 

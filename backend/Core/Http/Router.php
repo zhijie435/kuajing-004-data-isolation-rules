@@ -2,6 +2,12 @@
 
 namespace App\Core\Http;
 
+use App\Core\Exception\AppException;
+use App\Core\Exception\ForbiddenException;
+use App\Core\Exception\NotFoundException;
+use App\Core\Exception\UnauthorizedException;
+use App\Core\Exception\ValidationException;
+
 class Router
 {
     private array $routes = [];
@@ -115,15 +121,7 @@ class Router
                     'body' => json_encode(['code' => 0, 'message' => 'success', 'data' => $result], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
                 ];
             } catch (\Throwable $e) {
-                return [
-                    'status' => 500,
-                    'body' => json_encode([
-                        'code' => $e->getCode() ?: 500,
-                        'message' => $e->getMessage(),
-                        'data' => null,
-                        'trace' => explode("\n", $e->getTraceAsString()),
-                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
-                ];
+                return $this->formatException($e);
             }
         };
 
@@ -134,5 +132,40 @@ class Router
         }
 
         return $next($request);
+    }
+
+    private function formatException(\Throwable $e): array
+    {
+        if ($e instanceof AppException) {
+            $body = array_merge($e->toArray(), ['data' => null]);
+            if (getenv('APP_DEBUG')) {
+                $body['trace'] = explode("\n", $e->getTraceAsString());
+            }
+            return [
+                'status' => $e->getHttpCode(),
+                'body' => json_encode($body, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+            ];
+        }
+
+        $status = 500;
+        $code = $e->getCode() ?: 500;
+        $message = $e->getMessage() ?: '服务器内部错误';
+        $errorCode = 'SERVER_ERROR';
+
+        $body = [
+            'code' => $code,
+            'error_code' => $errorCode,
+            'message' => $message,
+            'data' => null,
+        ];
+
+        if (getenv('APP_DEBUG')) {
+            $body['trace'] = explode("\n", $e->getTraceAsString());
+        }
+
+        return [
+            'status' => $status,
+            'body' => json_encode($body, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+        ];
     }
 }

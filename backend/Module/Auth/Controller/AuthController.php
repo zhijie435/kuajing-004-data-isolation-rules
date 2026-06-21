@@ -2,6 +2,8 @@
 
 namespace App\Module\Auth\Controller;
 
+use App\Core\Exception\UnauthorizedException;
+
 class AuthController
 {
     public function login(array $request): array
@@ -13,12 +15,12 @@ class AuthController
         $users = self::mockUsers();
 
         if (!isset($users[$username])) {
-            throw new \RuntimeException('用户名或密码错误');
+            throw new UnauthorizedException('用户名或密码错误');
         }
 
         $user = $users[$username];
         if ($password !== '123456') {
-            throw new \RuntimeException('用户名或密码错误');
+            throw new UnauthorizedException('用户名或密码错误');
         }
 
         $header = base64_encode(json_encode(['alg' => 'HS256', 'typ' => 'JWT']));

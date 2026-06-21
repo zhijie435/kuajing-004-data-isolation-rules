@@ -5,6 +5,9 @@ namespace App\Module\Course\Service;
 use App\Core\Service\DataVisibilityService;
 use App\Module\Course\Model\CourseModel;
 use App\Core\Context\TenantContext;
+use App\Core\Exception\ForbiddenException;
+use App\Core\Exception\NotFoundException;
+use App\Core\Exception\ValidationException;
 
 class CourseService
 {
@@ -34,7 +37,7 @@ class CourseService
     {
         $course = CourseModel::findById($id);
         if (!$course) {
-            throw new \RuntimeException('课程不存在或无权查看');
+            throw new NotFoundException('课程不存在或无权查看');
         }
 
         $this->visibility->assertCanView($course, '课程');
@@ -53,7 +56,7 @@ class CourseService
         $ctx = TenantContext::getInstance();
 
         if (!$ctx->isSuperAdmin() && !$ctx->getTenantId()) {
-            throw new \RuntimeException('必须指定所属租户');
+            throw new ValidationException('必须指定所属租户');
         }
 
         $course = CourseModel::create($data);
@@ -69,7 +72,7 @@ class CourseService
     {
         $course = CourseModel::findByIdRaw($id);
         if (!$course) {
-            throw new \RuntimeException('课程不存在');
+            throw new NotFoundException('课程不存在');
         }
 
         $this->visibility->assertCanModify($course, '课程');
@@ -86,14 +89,14 @@ class CourseService
     {
         $course = CourseModel::findByIdRaw($id);
         if (!$course) {
-            throw new \RuntimeException('课程不存在');
+            throw new NotFoundException('课程不存在');
         }
 
         $this->visibility->assertCanModify($course, '课程');
 
         $deleted = CourseModel::delete($id);
         if (!$deleted) {
-            throw new \RuntimeException('删除失败');
+            throw new ValidationException('删除失败');
         }
 
         return [

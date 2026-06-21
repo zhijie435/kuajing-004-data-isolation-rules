@@ -4,6 +4,7 @@ namespace App\Core\Middleware;
 
 use App\Core\Context\TenantContext;
 use App\Core\Enum\RoleType;
+use App\Core\Exception\UnauthorizedException;
 
 class TenantMiddleware
 {
@@ -54,16 +55,16 @@ class TenantMiddleware
 
         $parts = explode('.', $token);
         if (count($parts) !== 3) {
-            throw new \RuntimeException('令牌格式无效');
+            throw new UnauthorizedException('令牌格式无效');
         }
 
         $payload = json_decode(base64_decode(strtr($parts[1], '-_', '+/')), true);
         if (!$payload) {
-            throw new \RuntimeException('令牌解析失败');
+            throw new UnauthorizedException('令牌解析失败');
         }
 
         if (!isset($payload['user_id'], $payload['role'])) {
-            throw new \RuntimeException('令牌缺少必要字段');
+            throw new UnauthorizedException('令牌缺少必要字段');
         }
 
         return $payload;

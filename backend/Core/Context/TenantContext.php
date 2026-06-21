@@ -4,6 +4,7 @@ namespace App\Core\Context;
 
 use App\Core\Enum\DataScopeLevel;
 use App\Core\Enum\RoleType;
+use App\Core\Exception\ForbiddenException;
 
 class TenantContext
 {
@@ -73,7 +74,11 @@ class TenantContext
     public function setDataScope(DataScopeLevel $scope): void
     {
         if ($this->role && $scope->gte($this->role->defaultDataScope())) {
-            throw new \RuntimeException('越权设置数据可见范围');
+            throw (new ForbiddenException('越权设置数据可见范围'))
+                ->setContext([
+                    'requested_scope' => $scope->value,
+                    'role_default_scope' => $this->role->defaultDataScope()->value,
+                ]);
         }
         $this->dataScope = $scope;
     }

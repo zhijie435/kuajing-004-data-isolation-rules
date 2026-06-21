@@ -4,6 +4,7 @@ namespace App\Module\Core\Controller;
 
 use App\Core\Enum\DataScopeLevel;
 use App\Core\Service\DataVisibilityService;
+use App\Core\Exception\ValidationException;
 
 class DataScopeController
 {
@@ -39,7 +40,7 @@ class DataScopeController
 
         $target = DataScopeLevel::tryFrom($scopeValue);
         if (!$target) {
-            throw new \RuntimeException('无效的数据可见范围值');
+            throw new ValidationException('无效的数据可见范围值');
         }
 
         return $this->visibility->switchScope($target);
@@ -52,7 +53,7 @@ class DataScopeController
         $action = $body['action'] ?? 'view';
 
         if (empty($resource)) {
-            throw new \RuntimeException('缺少资源数据');
+            throw new ValidationException('缺少资源数据');
         }
 
         if ($action === 'modify') {
