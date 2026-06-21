@@ -114,33 +114,56 @@ class CourseService
     {
         $visibleRoles = $this->visibility->buildCrossRoleFilter($targetRoles);
 
-        $allCourses = CourseModel::findAllByFilter();
+        $rawCourses = \App\Module\Course\Model\CourseModel::mockData();
+        $allCourses = array_values($rawCourses);
+
+        $roleCountStats = [];
+        foreach ($visibleRoles as $role) {
+            $roleCountStats[$role] = 0;
+        }
+
         $filtered = [];
+        $ownerRoleMap = \App\Core\Service\DataVisibilityService::OWNER_ID_ROLE_MAP;
 
-        $roleOwnerMap = [
-            202 => 'teacher', 203 => 'teacher', 204 => 'teacher',
-            301 => 'teacher', 302 => 'teacher', 303 => 'teacher',
-            401 => 'team_leader', 402 => 'dept_head',
-            501 => 'tenant_admin',
-            999 => 'super_admin',
-        ];
+        foreach ($allCourses as $c) {
+            $ownerId = $c['owner_id'] ?? $c['created_by'] ?? null;
+            $ownerRole = $ownerRoleMap[$ownerId] ?? \App\Core\Enum\RoleType::STUDENT->value;
 
-        foreach ($allCourses['list'] as $c) {
-            $ownerRole = $roleOwnerMap[$c['owner_id']] ?? 'student';
-            if (in_array($ownerRole, $visibleRoles, true)) {
-                $filtered[] = [
-                    'course_id' => $c['id'],
-                    'title' => $c['title'],
-                    'owner_role' => $ownerRole,
-                    'visible' => true,
-                ];
+            if (!in_array($ownerRole, $visibleRoles, true)) {
+                continue;
             }
+
+            $canView = $this->visibility->canViewResource($c);
+
+            if (isset($roleCountStats[$ownerRole])) {
+                $roleCountStats[$ownerRole]++;
+            }
+
+            $filtered[] = [
+                'course_id' => $c['id'],
+                'title' => $c['title'],
+                'owner_id' => $ownerId,
+                'owner_role' => $ownerRole,
+                'owner_role_label' => \App\Core\Enum\RoleType::from($ownerRole)->label(),
+                'tenant_id' => $c['tenant_id'] ?? null,
+                'visible_by_scope' => $canView,
+            ];
+        }
+
+        $roleCountDetails = [];
+        foreach ($roleCountStats as $roleKey => $count) {
+            $roleCountDetails[] = [
+                'role' => $roleKey,
+                'role_label' => \App\Core\Enum\RoleType::from($roleKey)->label(),
+                'count' => $count,
+            ];
         }
 
         return [
             'target_roles' => $targetRoles,
             'visible_roles' => $visibleRoles,
             'visible_course_count' => count($filtered),
+            'role_breakdown' => $roleCountDetails,
             'courses' => $filtered,
         ];
     }

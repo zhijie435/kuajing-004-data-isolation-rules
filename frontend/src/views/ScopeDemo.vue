@@ -89,6 +89,53 @@
                   <el-tag type="warning" effect="dark">{{ crossRoleReport.visible_course_count || 0 }}</el-tag>
                 </el-descriptions-item>
               </el-descriptions>
+
+              <div class="visible-roles-panel" style="margin-top: 12px">
+                <div class="section-title">
+                  <el-tag type="success" effect="dark">当前可见角色列表（与上方可见角色数一致）</el-tag>
+                </div>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px">
+                  <el-tag
+                    v-for="roleKey in crossRoleReport.visible_roles"
+                    :key="roleKey"
+                    size="small"
+                    :type="roleTagType(roleKey)"
+                  >
+                    {{ getRoleLabel(roleKey) }}
+                  </el-tag>
+                </div>
+              </div>
+
+              <el-table
+                v-if="crossRoleReport.role_breakdown?.length"
+                :data="crossRoleReport.role_breakdown"
+                size="small"
+                style="margin-top: 12px"
+                max-height="120"
+              >
+                <el-table-column prop="role_label" label="角色" width="120" />
+                <el-table-column prop="count" label="对应课程数" width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag type="warning" size="small">{{ row.count }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="与角色列表一致" align="center">
+                  <template #default="{ row }">
+                    <el-tag v-if="crossRoleReport.visible_roles?.includes(row.role)" type="success" size="small">匹配 ✅</el-tag>
+                    <el-tag v-else type="danger" size="small">不匹配 ❌</el-tag>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <el-alert
+                v-if="!breakdownMatchesVisibleRoles"
+                type="error"
+                show-icon
+                :closable="false"
+                style="margin-top: 12px"
+                title="异常：角色分布明细与可见角色列表不一致"
+              />
+
               <el-table
                 v-if="crossRoleReport.courses?.length"
                 :data="crossRoleReport.courses"
@@ -98,11 +145,21 @@
               >
                 <el-table-column prop="course_id" label="课程ID" width="80" />
                 <el-table-column prop="title" label="课程名称" />
-                <el-table-column prop="owner_role" label="创建者角色" width="120">
+                <el-table-column prop="owner_role_label" label="创建者角色" width="120">
                   <template #default="{ row }">
                     <el-tag size="small" :type="roleTagType(row.owner_role)">
-                      {{ getRoleLabel(row.owner_role) }}
+                      {{ row.owner_role_label }}
                     </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="角色匹配" width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag
+                      v-if="crossRoleReport.visible_roles?.includes(row.owner_role)"
+                      type="success"
+                      size="small"
+                    >匹配</el-tag>
+                    <el-tag v-else type="danger" size="small">不匹配</el-tag>
                   </template>
                 </el-table-column>
               </el-table>
@@ -445,6 +502,17 @@ const auditStatusLabel = computed(() => {
   if (s === 'error') return '存在严重异常'
   if (s === 'warning') return '存在警告'
   return '核对通过'
+})
+
+const breakdownMatchesVisibleRoles = computed(() => {
+  if (!crossRoleReport.value) return true
+  const visibleRolesList = crossRoleReport.value.visible_roles || []
+  const breakdown = crossRoleReport.value.role_breakdown || []
+  if (breakdown.length !== visibleRolesList.length) return false
+  for (const item of breakdown) {
+    if (!visibleRolesList.includes(item.role)) return false
+  }
+  return true
 })
 
 function getVisibleCount(level: number): number {

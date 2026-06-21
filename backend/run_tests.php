@@ -581,7 +581,131 @@ foreach ($auditTestCases as $idx => $test) {
 }
 
 echo str_repeat('=', 60) . "\n";
-echo $allPassed ? "🎉 全部测试通过！包括跨角色数据可见范围导出核对！\n" : "⚠️ 存在测试失败，请检查实现\n";
+echo "▶ 跨角色筛选明细与列表一致性验证（核心修复）\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$consistencyCases = [
+    [
+        'name' => '10.1 超级管理员-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => null, 'user_id' => 999, 'username' => 'super_admin',
+            'role' => 'super_admin', 'dept_id' => null, 'team_id' => null,
+        ],
+    ],
+    [
+        'name' => '10.2 租户管理员-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 101, 'username' => 'admin_huaxia',
+            'role' => 'tenant_admin', 'dept_id' => 1, 'team_id' => null,
+        ],
+    ],
+    [
+        'name' => '10.3 部门主管-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 102, 'username' => 'dept_chinese',
+            'role' => 'dept_head', 'dept_id' => 4, 'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+    ],
+    [
+        'name' => '10.4 团队负责人-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 201, 'username' => 'team_leader_1',
+            'role' => 'team_leader', 'dept_id' => 4, 'team_id' => 101,
+            'team_member_ids' => [101, 202, 203, 204],
+        ],
+    ],
+    [
+        'name' => '10.5 普通讲师-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 202, 'username' => 'teacher_zhang',
+            'role' => 'teacher', 'dept_id' => 2, 'team_id' => 101,
+        ],
+    ],
+    [
+        'name' => '10.6 学员-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 3, 'user_id' => 501, 'username' => 'student_xiao',
+            'role' => 'student', 'dept_id' => 2, 'team_id' => null,
+        ],
+    ],
+    [
+        'name' => '10.7 指定目标角色[teacher, student]-筛选与明细一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 102, 'username' => 'dept_chinese',
+            'role' => 'dept_head', 'dept_id' => 4, 'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+        'target_roles' => ['teacher', 'student'],
+    ],
+];
+
+$courseSvc = new \App\Module\Course\Service\CourseService();
+
+foreach ($consistencyCases as $case) {
+    echo "▶ {$case['name']}\n";
+
+    $ctx->reset();
+    $ctx->bootstrap($case['ctx']);
+
+    $targetRoles = $case['target_roles'] ?? [];
+
+    $report = $courseSvc->crossRoleViewReport($targetRoles);
+
+    echo "  visible_roles: " . implode(', ', $report['visible_roles']) . "\n";
+    echo "  visible_course_count: {$report['visible_course_count']}\n";
+    echo "  courses明细条数: " . count($report['courses']) . "\n";
+
+    $casePassed = true;
+
+    $countMatch = $report['visible_course_count'] === count($report['courses']);
+    if (!$countMatch) {
+        echo "  ❌ 可见条数与明细条数不一致: count={$report['visible_course_count']}, 明细=" . count($report['courses']) . "\n";
+        $casePassed = false;
+    } else {
+        echo "  ✅ 可见条数与明细条数一致\n";
+    }
+
+    if (isset($report['role_breakdown'])) {
+        $breakdownRoles = array_column($report['role_breakdown'], 'role');
+        $visibleRolesSet = $report['visible_roles'];
+        sort($breakdownRoles);
+        sort($visibleRolesSet);
+        if ($breakdownRoles === $visibleRolesSet) {
+            echo "  ✅ role_breakdown 与 visible_roles 完全匹配\n";
+        } else {
+            echo "  ❌ role_breakdown 与 visible_roles 不匹配: breakdown=" . implode(',', $breakdownRoles) . " vs visible=" . implode(',', $visibleRolesSet) . "\n";
+            $casePassed = false;
+        }
+
+        $totalFromBreakdown = array_sum(array_column($report['role_breakdown'], 'count'));
+        if ($totalFromBreakdown === $report['visible_course_count']) {
+            echo "  ✅ role_breakdown 合计数与 visible_course_count 一致\n";
+        } else {
+            echo "  ❌ role_breakdown 合计数与 visible_course_count 不一致: breakdown_total={$totalFromBreakdown}, count={$report['visible_course_count']}\n";
+            $casePassed = false;
+        }
+    }
+
+    $badCourses = [];
+    foreach ($report['courses'] as $course) {
+        if (!in_array($course['owner_role'], $report['visible_roles'], true)) {
+            $badCourses[] = $course['course_id'];
+        }
+    }
+    if (empty($badCourses)) {
+        echo "  ✅ 所有课程明细的 owner_role 均在 visible_roles 内\n";
+    } else {
+        echo "  ❌ 以下课程 owner_role 不在 visible_roles 内: #" . implode(', #', $badCourses) . "\n";
+        $casePassed = false;
+    }
+
+    echo "  → 结果: " . ($casePassed ? '✅ PASS' : '❌ FAIL') . "\n\n";
+    if (!$casePassed) $allPassed = false;
+}
+
+echo str_repeat('=', 60) . "\n";
+echo $allPassed ? "🎉 全部测试通过！包括跨角色筛选明细一致性！\n" : "⚠️ 存在测试失败，请检查实现\n";
 echo str_repeat('=', 60) . "\n";
 
 echo "\n📌 架构总结：\n";

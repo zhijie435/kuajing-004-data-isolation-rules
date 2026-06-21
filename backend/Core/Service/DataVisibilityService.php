@@ -11,9 +11,40 @@ class DataVisibilityService
 {
     private TenantContext $context;
 
+    public const ROLE_HIERARCHY = [
+        RoleType::SUPER_ADMIN->value => 100,
+        RoleType::TENANT_ADMIN->value => 80,
+        RoleType::DEPT_HEAD->value => 60,
+        RoleType::TEAM_LEADER->value => 40,
+        RoleType::TEACHER->value => 20,
+        RoleType::STUDENT->value => 10,
+    ];
+
+    public const OWNER_ID_ROLE_MAP = [
+        999 => RoleType::SUPER_ADMIN->value,
+        101 => RoleType::TENANT_ADMIN->value,
+        102 => RoleType::DEPT_HEAD->value,
+        201 => RoleType::TEAM_LEADER->value,
+        202 => RoleType::TEACHER->value,
+        203 => RoleType::TEACHER->value,
+        204 => RoleType::TEACHER->value,
+        301 => RoleType::TEACHER->value,
+        302 => RoleType::TEACHER->value,
+        303 => RoleType::TEACHER->value,
+        401 => RoleType::TENANT_ADMIN->value,
+        402 => RoleType::DEPT_HEAD->value,
+        501 => RoleType::STUDENT->value,
+    ];
+
     public function __construct()
     {
         $this->context = TenantContext::getInstance();
+    }
+
+    public function getOwnerRoleById(?int $ownerId): string
+    {
+        if ($ownerId === null) return RoleType::STUDENT->value;
+        return self::OWNER_ID_ROLE_MAP[$ownerId] ?? RoleType::STUDENT->value;
     }
 
     public function getAvailableScopes(): array
@@ -192,31 +223,50 @@ class DataVisibilityService
     public function buildCrossRoleFilter(array $targetRoles = []): array
     {
         $role = $this->context->getRole();
-        $roleHierarchy = [
-            RoleType::SUPER_ADMIN->value => 100,
-            RoleType::TENANT_ADMIN->value => 80,
-            RoleType::DEPT_HEAD->value => 60,
-            RoleType::TEAM_LEADER->value => 40,
-            RoleType::TEACHER->value => 20,
-            RoleType::STUDENT->value => 10,
-        ];
+        $roleHierarchy = self::ROLE_HIERARCHY;
 
         $currentLevel = $roleHierarchy[$role?->value ?? RoleType::STUDENT->value];
 
+        $visibleRoles = [];
+        foreach ($roleHierarchy as $roleKey => $level) {
+            if ($level <= $currentLevel) {
+                $visibleRoles[] = $roleKey;
+            }
+        }
+
         if (empty($targetRoles)) {
-            $visibleRoles = array_filter(
-                $roleHierarchy,
-                fn($level) => $level <= $currentLevel,
-                ARRAY_FILTER_USE_BOTH
-            );
-            return array_keys($visibleRoles);
+            return $visibleRoles;
         }
 
         $result = [];
         foreach ($targetRoles as $tr) {
             $trValue = is_string($tr) ? $tr : $tr->value;
-            if (isset($roleHierarchy[$trValue]) && $roleHierarchy[$trValue] <= $currentLevel) {
+            if (in_array($trValue, $visibleRoles, true)) {
                 $result[] = $trValue;
+            }
+        }
+
+        return array_values(array_unique($result));
+    }
+
+    public function filterResourcesByRoles(array $resources, array $targetRoles = []): array
+    {
+        $visibleRoles = $this->buildCrossRoleFilter($targetRoles);
+        $result = [];
+
+        foreach ($resources as $resource) {
+            $ownerId = $resource['owner_id'] ?? $resource['created_by'] ?? null;
+            $ownerRole = $this->getOwnerRoleById($ownerId);
+
+            if (in_array($ownerRole, $visibleRoles, true)) {
+                $result[] = [
+                    'id' => $resource['id'] ?? null,
+                    'title' => $resource['title'] ?? null,
+                    'owner_id' => $ownerId,
+                    'owner_role' => $ownerRole,
+                    'owner_role_label' => RoleType::from($ownerRole)->label(),
+                    'tenant_id' => $resource['tenant_id'] ?? null,
+                ];
             }
         }
 
