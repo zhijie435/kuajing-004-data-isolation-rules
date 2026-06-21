@@ -59,7 +59,7 @@
         </div>
       </template>
 
-      <el-table :data="courses" v-loading="loading" stripe>
+      <el-table :data="courses" v-loading="loading" stripe ref="tableRef">
         <el-table-column type="index" label="#" width="50" />
         <el-table-column prop="id" label="ID" width="70" />
         <el-table-column prop="tenant_id" label="租户ID" width="90">
@@ -87,7 +87,7 @@
             <el-tag size="small">{{ row.category }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="90">
+        <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.status === 'published'" type="success" size="small" effect="light">
               <el-icon><CircleCheck /></el-icon> 已发布
@@ -118,7 +118,7 @@
               link
               type="warning"
               :disabled="!row._permissions?.can_edit"
-              @click="editCourse(row)"
+              @click="openEditDialog(row)"
             >
               编辑
             </el-button>
@@ -135,7 +135,13 @@
       </el-table>
     </el-card>
 
-    <el-dialog v-model="showCreate" title="新建课程" width="520px" :close-on-click-modal="false">
+    <el-dialog
+      v-model="showCreate"
+      :title="isEditMode ? '编辑课程' : '新建课程'"
+      width="520px"
+      :close-on-click-modal="false"
+      @closed="onFormClosed"
+    >
       <el-form :model="courseForm" label-width="90px" ref="formRef" :rules="formRules">
         <el-form-item label="课程名称" prop="title">
           <el-input v-model="courseForm.title" placeholder="请输入课程名称" />
@@ -155,27 +161,50 @@
             <el-radio value="published">发布</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-form-item v-if="isEditMode" label="学员数" prop="student_count">
+          <el-input-number v-model="courseForm.student_count" :min="0" :max="99999" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showCreate = false">取消</el-button>
-        <el-button type="primary" @click="submitCreate">提交</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitForm">
+          {{ isEditMode ? '保存修改' : '提交' }}
+        </el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="showDetail" :title="'课程详情 - ' + detailCourse?.title" width="600px">
       <el-descriptions :column="2" border v-if="detailCourse">
         <el-descriptions-item label="课程ID">{{ detailCourse.id }}</el-descriptions-item>
-        <el-descriptions-item label="租户ID">{{ detailCourse.tenant_id ?? '公共数据' }}</el-descriptions-item>
+        <el-descriptions-item label="租户ID">
+          <el-tag v-if="detailCourse.tenant_id" size="small" type="warning">
+            {{ detailCourse.tenant_id }}
+          </el-tag>
+          <span v-else>公共数据</span>
+        </el-descriptions-item>
         <el-descriptions-item label="部门ID">{{ detailCourse.dept_id ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="团队ID">{{ detailCourse.team_id ?? '-' }}</el-descriptions-item>
-        <el-descriptions-item label="课程名称">{{ detailCourse.title }}</el-descriptions-item>
+        <el-descriptions-item label="课程名称" :span="2">{{ detailCourse.title }}</el-descriptions-item>
         <el-descriptions-item label="分类">{{ detailCourse.category }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ detailCourse.status }}</el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag v-if="detailCourse.status === 'published'" type="success" size="small">已发布</el-tag>
+          <el-tag v-else type="warning" size="small">草稿</el-tag>
+        </el-descriptions-item>
         <el-descriptions-item label="学员数">{{ detailCourse.student_count?.toLocaleString() }}</el-descriptions-item>
         <el-descriptions-item label="负责人ID">{{ detailCourse.owner_id }}</el-descriptions-item>
         <el-descriptions-item label="创建人ID">{{ detailCourse.created_by }}</el-descriptions-item>
         <el-descriptions-item label="创建时间" :span="2">{{ detailCourse.created_at }}</el-descriptions-item>
       </el-descriptions>
+      <template #footer>
+        <el-button @click="showDetail = false">关闭</el-button>
+        <el-button
+          v-if="detailCourse?._permissions?.can_edit"
+          type="primary"
+          @click="editFromDetail"
+        >
+          <el-icon><Edit /></el-icon> 编辑
+        </el-button>
+      </template>
     </el-dialog>
 
     <el-dialog v-model="showDebugDialog" title="SQL 调试 - 自动应用的租户过滤条件" width="720px">
@@ -192,7 +221,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, onMounted, reactive, ref, watch, nextTick } from 'vue'
 import { useDataScopeStore } from '@/stores/dataScope'
 import { courseApi } from '@/api'
 import type { Course } from '@/types'
@@ -203,7 +232,8 @@ import {
   Plus,
   Collection,
   CircleCheck,
-  EditPen
+  EditPen,
+  Edit
 } from '@element-plus/icons-vue'
 import {
   ElMessage,
@@ -215,12 +245,15 @@ import {
 const dataScopeStore = useDataScopeStore()
 
 const refreshTrigger = inject<number>('refreshTrigger', ref(0))
+const triggerRefresh = inject<() => void>('triggerRefresh', () => {})
 const refreshKey = computed(() => refreshTrigger.value)
 
 const loading = ref(false)
+const submitting = ref(false)
 const courses = ref<Course[]>([])
 const total = ref(0)
 const debugInfo = ref<any>(null)
+const tableRef = ref()
 
 const filter = reactive({
   keyword: '',
@@ -231,13 +264,16 @@ const filter = reactive({
 const showCreate = ref(false)
 const showDetail = ref(false)
 const showDebugDialog = ref(false)
+const isEditMode = ref(false)
+const editingId = ref<number | null>(null)
 const detailCourse = ref<Course | null>(null)
 const formRef = ref<FormInstance>()
 
 const courseForm = reactive({
   title: '',
   category: '',
-  status: 'draft'
+  status: 'draft' as 'draft' | 'published',
+  student_count: 0
 })
 
 const formRules: FormRules = {
@@ -267,6 +303,13 @@ async function loadCourses() {
     const res: any = await courseApi.list(params)
     courses.value = res.data.list || []
     total.value = res.data.total || 0
+
+    if (detailCourse.value && detailCourse.value.id) {
+      const updated = courses.value.find(c => c.id === detailCourse.value?.id)
+      if (updated) {
+        detailCourse.value = { ...updated }
+      }
+    }
   } catch (e) {
     // ignore
   } finally {
@@ -285,22 +328,50 @@ async function showDebug() {
 }
 
 function openCreateDialog() {
+  isEditMode.value = false
+  editingId.value = null
   courseForm.title = ''
   courseForm.category = ''
   courseForm.status = 'draft'
+  courseForm.student_count = 0
   showCreate.value = true
 }
 
-async function submitCreate() {
+function openEditDialog(row: Course) {
+  isEditMode.value = true
+  editingId.value = row.id
+  courseForm.title = row.title
+  courseForm.category = row.category
+  courseForm.status = row.status as 'draft' | 'published'
+  courseForm.student_count = row.student_count
+  showCreate.value = true
+}
+
+function onFormClosed() {
+  formRef.value?.clearValidate()
+}
+
+async function submitForm() {
   if (!formRef.value) return
   try {
     await formRef.value.validate()
-    const res: any = await courseApi.create({ ...courseForm })
-    ElMessage.success(res.message || '创建成功')
+    submitting.value = true
+
+    if (isEditMode.value && editingId.value) {
+      const res: any = await courseApi.update(editingId.value, { ...courseForm })
+      ElMessage.success(res.message || '更新成功')
+    } else {
+      const res: any = await courseApi.create({ ...courseForm })
+      ElMessage.success(res.message || '创建成功')
+    }
+
     showCreate.value = false
-    loadCourses()
+    await loadCourses()
+    triggerRefresh()
   } catch (e: any) {
     if (e?.message) ElMessage.error(e.message)
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -314,8 +385,12 @@ async function viewCourse(row: Course) {
   }
 }
 
-function editCourse(row: Course) {
-  ElMessage.info('编辑功能示例 - 实际开发中可弹出编辑表单')
+function editFromDetail() {
+  if (!detailCourse.value) return
+  showDetail.value = false
+  nextTick(() => {
+    openEditDialog(detailCourse.value!)
+  })
 }
 
 async function deleteCourse(row: Course) {
@@ -327,7 +402,13 @@ async function deleteCourse(row: Course) {
     })
     const res: any = await courseApi.remove(row.id)
     ElMessage.success(res.message || '删除成功')
-    loadCourses()
+    await loadCourses()
+    triggerRefresh()
+
+    if (detailCourse.value?.id === row.id) {
+      showDetail.value = false
+      detailCourse.value = null
+    }
   } catch (e) {
     if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
   }

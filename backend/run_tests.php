@@ -9,6 +9,7 @@ use App\Core\Orm\TenantScope;
 use App\Core\Service\DataVisibilityService;
 use App\Core\Database\QueryBuilder;
 use App\Module\Course\Model\CourseModel;
+use App\Core\Storage\InMemoryDataStore;
 
 echo "========================================\n";
 echo "  租户数据隔离过滤器 - 验证测试套件\n";
@@ -261,7 +262,187 @@ foreach ($roleHierarchyTest as $role => $desc) {
 }
 
 echo str_repeat('=', 60) . "\n";
-echo $allPassed ? "🎉 全部断言测试通过！\n" : "⚠️ 存在断言失败，请检查实现\n";
+echo "▶ 【重点修复验证：保存→列表→详情一致性\n";
+echo str_repeat('=', 60) . "\n\n";
+
+CourseModel::resetData();
+
+$consistencyTests = [
+    [
+        'name' => '8.1 创建课程后列表可见性验证',
+        'user' => ['user_id' => 202, 'role' => 'teacher', 'tenant_id' => 1, 'username' => 'teacher_zhang', 'dept_id' => 2, 'team_id' => 101],
+        'action' => 'create',
+        'data' => ['title' => '测试课程-张老师自创', 'category' => '测试', 'status' => 'published'],
+        'expect_after' => 3,
+    ],
+    [
+        'name' => '8.2 修改课程后列表状态同步验证',
+        'user' => ['user_id' => 202, 'role' => 'teacher', 'tenant_id' => 1, 'username' => 'teacher_zhang', 'dept_id' => 2, 'team_id' => 101],
+        'action' => 'update',
+        'target_id' => 1001,
+        'data' => ['title' => 'PHP高级编程实战-已更新', 'status' => 'draft'],
+        'check_field' => 'status',
+        'expect_value' => 'draft',
+    ],
+    [
+        'name' => '8.3 findById 与列表数据一致(tenant隔离)',
+        'user' => ['user_id' => 101, 'role' => 'tenant_admin', 'tenant_id' => 1, 'username' => 'admin_huaxia', 'dept_id' => 1, 'team_id' => null],
+        'action' => 'compare',
+        'check_ids' => [1001, 1002, 1006],
+    ],
+    [
+        'name' => '8.4 跨租户越权 findById 应返回null',
+        'user' => ['user_id' => 101, 'role' => 'tenant_admin', 'tenant_id' => 1, 'username' => 'admin_huaxia', 'dept_id' => 1, 'team_id' => null],
+        'action' => 'denied_find',
+        'target_id' => 1006,
+    ],
+    [
+        'name' => '8.5 删除后列表应不再包含该记录',
+        'user' => ['user_id' => 101, 'role' => 'tenant_admin', 'tenant_id' => 1, 'username' => 'admin_huaxia', 'dept_id' => 1, 'team_id' => null],
+        'action' => 'delete',
+        'target_id' => 1003,
+    ],
+];
+
+$consistencyPassed = true;
+
+foreach ($consistencyTests as $idx => $test) {
+    echo "▶ {$test['name']}\n";
+
+    $deptId = $test['user']['dept_id'] ?? null;
+    $deptChildren = $resolveDeptTree($deptId);
+
+    $ctx->reset();
+    $ctx->bootstrap(array_merge($test['user'], [
+        'dept_child_ids' => $deptChildren,
+    ]));
+
+    $action = $test['action'];
+    $passed = false;
+
+    switch ($action) {
+        case 'create':
+            $beforeList = CourseModel::findAllByFilter();
+            $beforeCount = $beforeList['total'];
+            echo "  创建前可见数: {$beforeCount}\n";
+
+            $created = CourseModel::create($test['data']);
+            echo "  创建的课程: #{$created['id']} - {$created['title']} (tenant={$created['tenant_id']})\n";
+
+            $afterList = CourseModel::findAllByFilter();
+            $afterCount = $afterList['total'];
+            echo "  创建后可见数: {$afterCount}\n";
+
+            $foundInList = false;
+            foreach ($afterList['list'] as $c) {
+                if ($c['id'] == $created['id']) {
+                    $foundInList = true;
+                    break;
+                }
+            }
+
+            $detail = CourseModel::findById($created['id']);
+            $detailMatches = $detail && $detail['id'] == $created['id'] && $detail['title'] == $created['title'];
+
+            $passed = $foundInList && $detailMatches && $afterCount > $beforeCount;
+            echo "  列表中出现新数据: " . ($foundInList ? '✅' : '❌') . "\n";
+            echo "  详情接口返回一致: " . ($detailMatches ? '✅' : '❌') . "\n";
+            break;
+
+        case 'update':
+            $before = CourseModel::findById($test['target_id']);
+            echo "  修改前: title={$before['title']}, status={$before['status']}\n";
+
+            CourseModel::update($test['target_id'], $test['data']);
+
+            $afterDetail = CourseModel::findById($test['target_id']);
+            $list = CourseModel::findAllByFilter();
+            $afterList = null;
+            foreach ($list['list'] as $c) {
+                if ($c['id'] == $test['target_id']) {
+                    $afterList = $c;
+                    break;
+                }
+            }
+
+            $field = $test['check_field'];
+            $detailOk = $afterDetail && $afterDetail[$field] == $test['expect_value'];
+            $listOk = $afterList && $afterList[$field] == $test['expect_value'];
+
+            $fieldVal = $afterDetail[$field] ?? 'null';
+            $listFieldVal = $afterList[$field] ?? 'null';
+            echo "  修改后详情{$field}: {$fieldVal}\n";
+            echo "  修改后列表{$field}: {$listFieldVal}\n";
+
+            $passed = $detailOk && $listOk;
+            echo "  详情与列表一致: " . ($passed ? '✅' : '❌') . "\n";
+            break;
+
+        case 'compare':
+            $list = CourseModel::findAllByFilter();
+            $listIds = array_column($list['list'], 'id');
+            echo "  列表中课程ID: " . implode(', ', $listIds) . "\n";
+
+            $mismatch = [];
+            foreach ($test['check_ids'] as $cid) {
+                $detail = CourseModel::findById($cid);
+                $inList = in_array($cid, $listIds);
+                $detailExists = $detail !== null;
+                echo "  课程#{$cid}: 列表中=" . ($inList ? '是' : '否') . ", 详情接口=" . ($detailExists ? '有' : '无');
+                if ($inList !== $detailExists) {
+                    echo " ❌ 不一致";
+                    $mismatch[] = $cid;
+                } else {
+                    echo " ✅";
+                }
+                echo "\n";
+            }
+            $passed = empty($mismatch);
+            break;
+
+        case 'denied_find':
+            $detail = CourseModel::findById($test['target_id']);
+            $passed = $detail === null;
+            echo "  尝试查询越权课程#{$test['target_id']}\n";
+            echo "  结果: " . ($detail === null ? '返回null（正确拦截）✅' : '返回了数据（越权漏洞）❌') . "\n";
+            break;
+
+        case 'delete':
+            $before = CourseModel::findAllByFilter();
+            $beforeCount = $before['total'];
+            echo "  删除前: {$beforeCount} 条\n";
+
+            CourseModel::delete($test['target_id']);
+
+            $after = CourseModel::findAllByFilter();
+            $afterCount = $after['total'];
+            $stillExists = false;
+            foreach ($after['list'] as $c) {
+                if ($c['id'] == $test['target_id']) {
+                    $stillExists = true;
+                    break;
+                }
+            }
+            $detailExists = CourseModel::findById($test['target_id']) !== null;
+
+            echo "  删除后: {$afterCount} 条\n";
+            echo "  列表中已消失: " . (!$stillExists ? '✅' : '❌') . "\n";
+            echo "  详情已返回null: " . (!$detailExists ? '✅' : '❌') . "\n";
+            $passed = !$stillExists && !$detailExists && $afterCount < $beforeCount;
+            break;
+    }
+
+    $statusStr = $passed ? '✅ PASS' : '❌ FAIL';
+    echo "  → 结果: {$statusStr}\n\n";
+
+    if (!$passed) {
+        $consistencyPassed = false;
+        $allPassed = false;
+    }
+}
+
+echo str_repeat('=', 60) . "\n";
+echo $allPassed ? "🎉 全部测试通过！包括保存-列表-详情一致性验证！\n" : "⚠️ 存在测试失败，请检查实现\n";
 echo str_repeat('=', 60) . "\n";
 
 echo "\n📌 架构总结：\n";
@@ -273,5 +454,13 @@ echo "   ├─ TenantScope: 根据上下文自动生成 WHERE 条件 (tenant_id
 echo "   │    ↓\n";
 echo "   ├─ QueryBuilder: 在toSql/getParams时自动应用TenantScope注入条件\n";
 echo "   │    ↓\n";
-echo "   └─ DataVisibilityService: 提供粒度更细的资源级权限断言 + 跨角色层级串联\n";
+echo "   ├─ InMemoryDataStore: 内存数据源，写操作真正持久化，确保列表详情同源\n";
+echo "   │    ↓\n";
+echo "   └─ DataVisibilityService: 资源级权限断言 + 跨角色层级串联\n";
+echo "\n";
+echo "🔧 修复要点：\n";
+echo "   1. 列表和详情查询使用同一套 InMemoryDataStore 数据源\n";
+echo "   2. findById 通过 DataVisibilityService 校验，杜绝越权\n";
+echo "   3. 创建/更新/删除真正写入数据源，刷新后状态一致\n";
+echo "   4. 前端保存后强制回读列表，保证前端状态同步\n";
 echo "\n";

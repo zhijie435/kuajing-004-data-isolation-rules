@@ -3,10 +3,24 @@
 namespace App\Module\Course\Model;
 
 use App\Core\Database\QueryBuilder;
+use App\Core\Storage\InMemoryDataStore;
+use App\Core\Context\TenantContext;
+use App\Core\Service\DataVisibilityService;
 
 class CourseModel
 {
     public const TABLE = 'courses';
+
+    private static bool $initialized = false;
+
+    private static function ensureInitialized(): void
+    {
+        if (self::$initialized) return;
+
+        $store = InMemoryDataStore::getInstance();
+        $store->initTable(self::TABLE, self::mockData());
+        self::$initialized = true;
+    }
 
     public static function query(): QueryBuilder
     {
@@ -15,18 +29,13 @@ class CourseModel
 
     public static function findAllByFilter(array $filter = []): array
     {
+        self::ensureInitialized();
+        $store = InMemoryDataStore::getInstance();
+
         $q = self::query()->select([
-            'c.id',
-            'c.tenant_id',
-            'c.dept_id',
-            'c.team_id',
-            'c.owner_id',
-            'c.created_by',
-            'c.title',
-            'c.category',
-            'c.status',
-            'c.student_count',
-            'c.created_at',
+            'c.id', 'c.tenant_id', 'c.dept_id', 'c.team_id',
+            'c.owner_id', 'c.created_by', 'c.title', 'c.category',
+            'c.status', 'c.student_count', 'c.created_at',
         ]);
 
         if (!empty($filter['status'])) {
@@ -39,15 +48,82 @@ class CourseModel
             $q->where('c.title', 'LIKE', "%{$filter['keyword']}%");
         }
 
-        $q->orderBy('c.created_at', 'DESC')->limit(50);
+        $q->orderBy('c.created_at', 'DESC')->limit(100);
 
-        return self::simulateResultSet($q);
+        return self::simulateResultSet($q, $filter);
     }
 
     public static function findById(int $id): ?array
     {
-        $all = self::mockData();
-        return $all[$id] ?? null;
+        self::ensureInitialized();
+        $store = InMemoryDataStore::getInstance();
+        $row = $store->find(self::TABLE, $id);
+        if (!$row) return null;
+
+        $visibility = new DataVisibilityService();
+        if (!$visibility->canViewResource($row)) {
+            return null;
+        }
+
+        return $row;
+    }
+
+    public static function findByIdRaw(int $id): ?array
+    {
+        self::ensureInitialized();
+        $store = InMemoryDataStore::getInstance();
+        return $store->find(self::TABLE, $id) ?? null;
+    }
+
+    public static function create(array $data): array
+    {
+        self::ensureInitialized();
+        $store = InMemoryDataStore::getInstance();
+        $ctx = TenantContext::getInstance();
+
+        $id = $store->nextId();
+        $course = [
+            'id' => $id,
+            'tenant_id' => $data['tenant_id'] ?? $ctx->getTenantId(),
+            'dept_id' => $data['dept_id'] ?? $ctx->getDeptId(),
+            'team_id' => $data['team_id'] ?? $ctx->getTeamId(),
+            'owner_id' => $data['owner_id'] ?? $ctx->getUserId(),
+            'created_by' => $ctx->getUserId(),
+            'title' => $data['title'],
+            'category' => $data['category'] ?? '未分类',
+            'status' => $data['status'] ?? 'draft',
+            'student_count' => 0,
+            'created_at' => date('Y-m-d H:i:s'),
+        ];
+
+        return $store->insert(self::TABLE, $course);
+    }
+
+    public static function update(int $id, array $data): ?array
+    {
+        self::ensureInitialized();
+        $store = InMemoryDataStore::getInstance();
+
+        $updatable = ['title', 'category', 'status', 'student_count'];
+        $updates = [];
+        foreach ($updatable as $k) {
+            if (isset($data[$k])) {
+                $updates[$k] = $data[$k];
+            }
+        }
+
+        if (empty($updates)) {
+            return $store->find(self::TABLE, $id);
+        }
+
+        return $store->update(self::TABLE, $id, $updates);
+    }
+
+    public static function delete(int $id): bool
+    {
+        self::ensureInitialized();
+        $store = InMemoryDataStore::getInstance();
+        return $store->delete(self::TABLE, $id);
     }
 
     public static function countByScope(): array
@@ -65,22 +141,29 @@ class CourseModel
         return self::query()->where('status', 'published')->debug();
     }
 
-    private static function simulateResultSet(QueryBuilder $q): array
+    public static function resetData(): void
     {
-        $all = self::mockData();
+        self::ensureInitialized();
+        InMemoryDataStore::getInstance()->resetTable(self::TABLE);
+    }
+
+    private static function simulateResultSet(QueryBuilder $q, array $filter = []): array
+    {
+        $store = InMemoryDataStore::getInstance();
+        $all = $store->all(self::TABLE);
         $scopeInfo = $q->debug();
 
         $sql = $scopeInfo['sql'];
-        $visibleIds = self::resolveVisibleIds($sql, $scopeInfo['params']);
+        $params = $scopeInfo['params'];
+        $visibleIds = self::resolveVisibleIds($sql, $params, $all);
 
         $rows = [];
         foreach ($all as $id => $course) {
-            if (in_array($id, $visibleIds, true)) {
-                if (!empty($filter['status']) && $course['status'] !== $filter['status']) continue;
-                if (!empty($filter['category']) && $course['category'] !== $filter['category']) continue;
-                if (!empty($filter['keyword']) && !str_contains($course['title'], $filter['keyword'])) continue;
-                $rows[] = $course;
-            }
+            if (!in_array($id, $visibleIds, true)) continue;
+            if (!empty($filter['status']) && $course['status'] !== $filter['status']) continue;
+            if (!empty($filter['category']) && $course['category'] !== $filter['category']) continue;
+            if (!empty($filter['keyword']) && !str_contains($course['title'], $filter['keyword'])) continue;
+            $rows[] = $course;
         }
 
         return [
@@ -90,18 +173,17 @@ class CourseModel
         ];
     }
 
-    private static function resolveVisibleIds(string $sql, array $params): array
+    private static function resolveVisibleIds(string $sql, array $params, array $all): array
     {
-        $all = self::mockData();
         $result = [];
 
         $tenantMatch = [];
-        if (preg_match('/tenant_id\s*=\s*\?/', $sql, $tenantMatch)) {
+        if (preg_match('/\btenant_id\s*=\s*\?/', $sql, $tenantMatch)) {
             $tid = $params[0] ?? null;
             foreach ($all as $id => $c) {
-                if ($c['tenant_id'] == $tid) $result[] = $id;
+                if (($c['tenant_id'] ?? null) == $tid && $tid !== null) $result[] = $id;
             }
-        } elseif (preg_match('/tenant_id\s+IS\s+NULL/', $sql)) {
+        } elseif (preg_match('/\btenant_id\s+IS\s+NULL/', $sql)) {
             foreach ($all as $id => $c) {
                 if ($c['tenant_id'] === null) $result[] = $id;
             }
@@ -109,40 +191,56 @@ class CourseModel
             $result = array_keys($all);
         }
 
-        if (preg_match('/dept_id\s+IN\s*\(([^)]+)\)/', $sql, $deptMatch)) {
+        if (preg_match('/\bdept_id\s+IN\s*\(([^)]+)\)/', $sql, $deptMatch)) {
             $count = substr_count($deptMatch[1], '?');
-            $startIdx = count($params) > $count ? count($params) - $count : 0;
-            $deptIds = array_slice($params, $startIdx, $count);
+            $deptIds = [];
+            for ($i = 0; $i < $count; $i++) {
+                if (isset($params[$i])) $deptIds[] = $params[$i];
+            }
+            $deptIds = array_slice($params, -$count, $count);
             $result = array_values(array_filter($result, function($id) use ($all, $deptIds) {
-                return in_array($all[$id]['dept_id'], $deptIds, true);
+                return in_array($all[$id]['dept_id'] ?? null, $deptIds, true);
             }));
-        } elseif (preg_match('/dept_id\s*=\s*\?/', $sql, $deptMatch)) {
-            $deptParam = end($params);
+        } elseif (preg_match('/\bdept_id\s*=\s*\?/', $sql, $deptMatch)) {
+            $deptParam = self::findParamByPosition($sql, $params, 'dept_id');
             $result = array_values(array_filter($result, function($id) use ($all, $deptParam) {
-                return $all[$id]['dept_id'] == $deptParam;
+                return ($all[$id]['dept_id'] ?? null) == $deptParam;
             }));
         }
 
-        if (preg_match('/owner_id\s+IN\s*\(([^)]+)\)/', $sql, $ownerMatch)) {
+        if (preg_match('/\bowner_id\s+IN\s*\(([^)]+)\)/', $sql, $ownerMatch)) {
             $count = substr_count($ownerMatch[1], '?');
-            $ownerIds = array_slice($params, -$count);
+            $ownerIds = array_slice($params, -$count, $count);
             $result = array_values(array_filter($result, function($id) use ($all, $ownerIds) {
-                return in_array($all[$id]['owner_id'], $ownerIds, true);
+                return in_array($all[$id]['owner_id'] ?? null, $ownerIds, true);
             }));
         }
 
-        if (preg_match('/\(owner_id\s*=\s*\?\s+OR\s+created_by\s*=\s*\?\)/', $sql)) {
+        if (preg_match('/\((?:\bowner_id\b\s*=\s*\?\s+OR\s+\bcreated_by\b\s*=\s*\?)\)/', $sql, $selfMatch)) {
             $uid = end($params);
             $result = array_values(array_filter($result, function($id) use ($all, $uid) {
-                return $all[$id]['owner_id'] == $uid || $all[$id]['created_by'] == $uid;
+                return ($all[$id]['owner_id'] ?? null) == $uid
+                    || ($all[$id]['created_by'] ?? null) == $uid;
             }));
         }
 
-        if (preg_match('/1\s*=\s*0/', $sql)) {
+        if (preg_match('/\b1\s*=\s*0\b/', $sql)) {
             return [];
         }
 
         return $result;
+    }
+
+    private static function findParamByPosition(string $sql, array $params, string $column): mixed
+    {
+        $pattern = "/\b{$column}\s*=\s*\?/";
+        if (!preg_match($pattern, $sql, $matches, PREG_OFFSET_CAPTURE)) {
+            return end($params);
+        }
+        $pos = $matches[0][1];
+        $beforeSql = substr($sql, 0, $pos);
+        $questionCount = substr_count($beforeSql, '?');
+        return $params[$questionCount] ?? end($params);
     }
 
     public static function mockData(): array
