@@ -104,3 +104,74 @@ export interface ApiResponse<T> {
   message: string
   data: T
 }
+
+export interface AuditAnomaly {
+  type: string
+  severity: 'error' | 'warning'
+  resource_id: number | null
+  resource_type: string
+  detail: string
+  expected?: boolean
+  actual?: boolean
+  resource_owner_id?: number | null
+  resource_tenant_id?: number | null
+  current_tenant_id?: number | null
+  resource_dept_id?: number | null
+  managed_dept_ids?: number[]
+  current_scope?: number
+  default_scope?: number
+}
+
+export interface AuditedResource {
+  id: number | null
+  title: string | null
+  owner_id: number | null
+  tenant_id: number | null
+  dept_id: number | null
+  actual_visible: boolean
+  expected_visible: boolean
+  actual_modifiable: boolean
+  anomaly: string | null
+  cross_tenant_leak: boolean
+  modify_without_view: boolean
+  dept_scope_overflow: boolean
+}
+
+export interface AuditSummary {
+  total_resources: number
+  actual_visible_count: number
+  expected_visible_count: number
+  visible_count_match: boolean
+  anomaly_count: number
+  error_count: number
+  warning_count: number
+  overall_status: 'healthy' | 'warning' | 'error'
+}
+
+export interface AuditContext {
+  user_id: number | null
+  username: string | null
+  role: string | null
+  role_label: string | null
+  current_scope: number
+  current_scope_label: string
+  tenant_id: number | null
+  dept_id: number | null
+  scope_mismatch: boolean
+}
+
+export interface RoleVisibilityExport {
+  role: string
+  role_label: string
+  default_scope: number
+  default_scope_label: string
+  expected_visibility: string
+}
+
+export interface CrossRoleAuditResult {
+  summary: AuditSummary
+  context: AuditContext
+  role_visibility_export: RoleVisibilityExport[]
+  audited_resources: AuditedResource[]
+  anomalies: AuditAnomaly[]
+}

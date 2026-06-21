@@ -442,7 +442,146 @@ foreach ($consistencyTests as $idx => $test) {
 }
 
 echo str_repeat('=', 60) . "\n";
-echo $allPassed ? "🎉 全部测试通过！包括保存-列表-详情一致性验证！\n" : "⚠️ 存在测试失败，请检查实现\n";
+echo "▶ 跨角色数据可见范围导出核对测试\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$auditTestCases = [
+    [
+        'name' => '9.1 超级管理员导出核对：所有资源应可见，无异常',
+        'payload' => [
+            'tenant_id' => null,
+            'user_id' => 999,
+            'username' => 'super_admin',
+            'role' => 'super_admin',
+            'dept_id' => null,
+            'team_id' => null,
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.2 租户管理员导出核对：仅本租户资源可见，跨租户应异常',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 101,
+            'username' => 'admin_huaxia',
+            'role' => 'tenant_admin',
+            'dept_id' => 1,
+            'team_id' => null,
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.3 普通讲师导出核对：仅本人资源可见',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 202,
+            'username' => 'teacher_zhang',
+            'role' => 'teacher',
+            'dept_id' => 2,
+            'team_id' => 101,
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.4 部门主管导出核对：部门及下级可见',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 102,
+            'username' => 'dept_chinese',
+            'role' => 'dept_head',
+            'dept_id' => 4,
+            'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.5 范围不一致核对：讲师切换到租户级后核对',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 202,
+            'username' => 'teacher_zhang',
+            'role' => 'teacher',
+            'dept_id' => 2,
+            'team_id' => 101,
+            'data_scope' => 2,
+        ],
+        'expect_has_scope_mismatch' => true,
+    ],
+];
+
+$allCoursesRaw = CourseModel::mockData();
+$auditTestResources = array_values($allCoursesRaw);
+
+$auditPassed = true;
+
+foreach ($auditTestCases as $idx => $test) {
+    echo "▶ {$test['name']}\n";
+
+    $deptId = $test['payload']['dept_id'] ?? null;
+    $deptChildren = $resolveDeptTree($deptId);
+
+    $ctx->reset();
+    $ctx->bootstrap(array_merge($test['payload'], [
+        'dept_child_ids' => $test['payload']['dept_child_ids'] ?? $deptChildren,
+    ]));
+
+    $auditResult = $svc->exportCrossRoleAudit($auditTestResources, 'course');
+
+    echo "  总资源数: {$auditResult['summary']['total_resources']}\n";
+    echo "  实际可见: {$auditResult['summary']['actual_visible_count']}\n";
+    echo "  预期可见: {$auditResult['summary']['expected_visible_count']}\n";
+    echo "  可见数一致: " . ($auditResult['summary']['visible_count_match'] ? '✅' : '❌') . "\n";
+    echo "  异常数: {$auditResult['summary']['anomaly_count']}\n";
+    echo "  严重异常: {$auditResult['summary']['error_count']}\n";
+    echo "  警告: {$auditResult['summary']['warning_count']}\n";
+    echo "  整体状态: {$auditResult['summary']['overall_status']}\n";
+
+    $testPassed = true;
+
+    if (isset($test['expect_status'])) {
+        if ($auditResult['summary']['overall_status'] !== $test['expect_status']) {
+            $testPassed = false;
+            echo "  ❌ 整体状态不符: 预期={$test['expect_status']}, 实际={$auditResult['summary']['overall_status']}\n";
+        }
+    }
+
+    if (isset($test['expect_anomaly_count'])) {
+        if ($auditResult['summary']['anomaly_count'] !== $test['expect_anomaly_count']) {
+            $testPassed = false;
+            echo "  ❌ 异常数不符: 预期={$test['expect_anomaly_count']}, 实际={$auditResult['summary']['anomaly_count']}\n";
+        }
+    }
+
+    if (isset($test['expect_has_scope_mismatch'])) {
+        if ($auditResult['context']['scope_mismatch'] !== $test['expect_has_scope_mismatch']) {
+            $testPassed = false;
+            echo "  ❌ 范围不一致检测不符: 预期=" . ($test['expect_has_scope_mismatch'] ? 'true' : 'false') . ", 实际=" . ($auditResult['context']['scope_mismatch'] ? 'true' : 'false') . "\n";
+        }
+    }
+
+    if (!empty($auditResult['anomalies'])) {
+        echo "  异常列表:\n";
+        foreach ($auditResult['anomalies'] as $a) {
+            echo "    - [{$a['severity']}] {$a['type']}: {$a['detail']}\n";
+        }
+    }
+
+    $statusStr = $testPassed ? '✅ PASS' : '❌ FAIL';
+    echo "  → 结果: {$statusStr}\n\n";
+
+    if (!$testPassed) {
+        $auditPassed = false;
+        $allPassed = false;
+    }
+}
+
+echo str_repeat('=', 60) . "\n";
+echo $allPassed ? "🎉 全部测试通过！包括跨角色数据可见范围导出核对！\n" : "⚠️ 存在测试失败，请检查实现\n";
 echo str_repeat('=', 60) . "\n";
 
 echo "\n📌 架构总结：\n";

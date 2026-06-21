@@ -156,6 +156,214 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <el-row :gutter="16" style="margin-top: 16px">
+      <el-col :span="24">
+        <el-card shadow="hover">
+          <template #header>
+            <div class="card-header">
+              <el-icon><Monitor /></el-icon>
+              <span>跨角色数据可见范围导出核对</span>
+              <el-tag
+                v-if="auditResult"
+                :type="auditStatusTagType"
+                effect="dark"
+                size="small"
+                style="margin-left: 12px"
+              >
+                {{ auditStatusLabel }}
+              </el-tag>
+            </div>
+          </template>
+          <div class="audit-section">
+            <el-alert
+              title="核对当前角色的实际可见数据与预期可见范围是否一致，检测越权泄露和可见性缺失等异常"
+              type="info"
+              show-icon
+              :closable="false"
+              style="margin-bottom: 16px"
+            />
+
+            <div class="audit-actions" style="display: flex; gap: 12px; margin-bottom: 16px">
+              <el-button type="primary" @click="runAudit" :loading="auditLoading">
+                <el-icon><DataAnalysis /></el-icon> 执行导出核对
+              </el-button>
+              <el-button @click="auditResult = null" :disabled="!auditResult">
+                <el-icon><RefreshRight /></el-icon> 重置
+              </el-button>
+            </div>
+
+            <template v-if="auditResult">
+              <el-row :gutter="16" style="margin-bottom: 16px">
+                <el-col :span="6">
+                  <el-statistic title="资源总数" :value="auditResult.summary.total_resources" />
+                </el-col>
+                <el-col :span="6">
+                  <el-statistic title="实际可见" :value="auditResult.summary.actual_visible_count">
+                    <template #suffix>
+                      <el-tag
+                        :type="auditResult.summary.visible_count_match ? 'success' : 'danger'"
+                        size="small"
+                        style="margin-left: 4px"
+                      >
+                        {{ auditResult.summary.visible_count_match ? '一致' : '不一致' }}
+                      </el-tag>
+                    </template>
+                  </el-statistic>
+                </el-col>
+                <el-col :span="6">
+                  <el-statistic title="预期可见" :value="auditResult.summary.expected_visible_count" />
+                </el-col>
+                <el-col :span="6">
+                  <el-statistic title="异常总数" :value="auditResult.summary.anomaly_count">
+                    <template #suffix>
+                      <span v-if="auditResult.summary.error_count > 0" style="color: var(--el-color-danger); font-size: 12px; margin-left: 4px">
+                        ({{ auditResult.summary.error_count }} 严重)
+                      </span>
+                      <span v-else-if="auditResult.summary.warning_count > 0" style="color: var(--el-color-warning); font-size: 12px; margin-left: 4px">
+                        ({{ auditResult.summary.warning_count }} 警告)
+                      </span>
+                    </template>
+                  </el-statistic>
+                </el-col>
+              </el-row>
+
+              <el-alert
+                v-if="auditResult.context.scope_mismatch"
+                type="warning"
+                show-icon
+                :closable="false"
+                style="margin-bottom: 12px"
+              >
+                <template #title>
+                  <span>数据可见范围与角色默认范围不一致</span>
+                </template>
+                当前可见范围为「{{ auditResult.context.current_scope_label }}」，角色默认范围为「{{ getDefaultScopeLabel(auditResult.context.role) }}」，可能存在越权或范围缩窄
+              </el-alert>
+
+              <el-descriptions :column="3" border size="small" style="margin-bottom: 16px">
+                <el-descriptions-item label="核对用户">{{ auditResult.context.username }}（{{ auditResult.context.role_label }}）</el-descriptions-item>
+                <el-descriptions-item label="所属租户">{{ auditResult.context.tenant_id ?? '全租户' }}</el-descriptions-item>
+                <el-descriptions-item label="当前可见范围">{{ auditResult.context.current_scope_label }}</el-descriptions-item>
+              </el-descriptions>
+
+              <el-divider content-position="left">各角色默认可见范围</el-divider>
+              <el-table :data="auditResult.role_visibility_export" size="small" style="margin-bottom: 16px">
+                <el-table-column prop="role_label" label="角色" width="120" />
+                <el-table-column prop="default_scope_label" label="默认可见范围" width="150" />
+                <el-table-column prop="expected_visibility" label="预期可见数据说明" />
+              </el-table>
+
+              <el-divider content-position="left">
+                <span>核对详情</span>
+                <el-tag
+                  v-if="auditResult.summary.error_count > 0"
+                  type="danger"
+                  size="small"
+                  style="margin-left: 8px"
+                >
+                  {{ auditResult.summary.error_count }} 条严重异常
+                </el-tag>
+                <el-tag
+                  v-if="auditResult.summary.warning_count > 0"
+                  type="warning"
+                  size="small"
+                  style="margin-left: 8px"
+                >
+                  {{ auditResult.summary.warning_count }} 条警告
+                </el-tag>
+              </el-divider>
+
+              <el-table
+                :data="auditResult.audited_resources"
+                size="small"
+                :row-class-name="auditRowClassName"
+                style="margin-bottom: 16px"
+              >
+                <el-table-column prop="id" label="ID" width="70" />
+                <el-table-column prop="title" label="标题" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="owner_id" label="负责人" width="80" />
+                <el-table-column prop="tenant_id" label="租户" width="70">
+                  <template #default="{ row }">
+                    {{ row.tenant_id ?? '无' }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="实际可见" width="90" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="row.actual_visible ? 'success' : 'info'" size="small" effect="dark">
+                      {{ row.actual_visible ? '可见' : '不可见' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="预期可见" width="90" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="row.expected_visible ? 'success' : 'info'" size="small" effect="plain">
+                      {{ row.expected_visible ? '应可见' : '不应见' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="核对结果" width="120" align="center">
+                  <template #default="{ row }">
+                    <el-tag v-if="row.anomaly" :type="row.anomaly.includes('ACTUAL_VISIBLE') ? 'danger' : 'warning'" size="small" effect="dark">
+                      {{ anomalyLabel(row.anomaly) }}
+                    </el-tag>
+                    <el-tag v-else type="success" size="small">正常</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="风险标记" width="160">
+                  <template #default="{ row }">
+                    <el-tag v-if="row.cross_tenant_leak" type="danger" size="small" style="margin-right: 4px">跨租户泄露</el-tag>
+                    <el-tag v-if="row.modify_without_view" type="warning" size="small" style="margin-right: 4px">可改不可见</el-tag>
+                    <el-tag v-if="row.dept_scope_overflow" type="warning" size="small">部门越界</el-tag>
+                    <span v-if="!row.cross_tenant_leak && !row.modify_without_view && !row.dept_scope_overflow" style="color: #9ca3af; font-size: 12px">-</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <template v-if="auditResult.anomalies.length > 0">
+                <el-divider content-position="left">
+                  <span style="color: var(--el-color-danger)">异常提示</span>
+                </el-divider>
+                <div class="anomaly-list">
+                  <el-alert
+                    v-for="(anomaly, idx) in auditResult.anomalies"
+                    :key="idx"
+                    :type="anomaly.severity === 'error' ? 'error' : 'warning'"
+                    show-icon
+                    :closable="false"
+                    style="margin-bottom: 8px"
+                  >
+                    <template #title>
+                      <span style="font-weight: 600">{{ anomalyTypeLabel(anomaly.type) }}</span>
+                      <el-tag
+                        :type="anomaly.severity === 'error' ? 'danger' : 'warning'"
+                        size="small"
+                        effect="dark"
+                        style="margin-left: 8px"
+                      >
+                        {{ anomaly.severity === 'error' ? '严重' : '警告' }}
+                      </el-tag>
+                      <span v-if="anomaly.resource_id" style="margin-left: 8px; color: #6b7280; font-size: 12px">
+                        资源#{{ anomaly.resource_id }}
+                      </span>
+                    </template>
+                    <div style="font-size: 13px; line-height: 1.6">{{ anomaly.detail }}</div>
+                  </el-alert>
+                </div>
+              </template>
+
+              <template v-else>
+                <el-result icon="success" title="核对通过" sub-title="所有资源的实际可见性与预期一致，无异常">
+                  <template #extra>
+                    <el-tag type="success" effect="dark" size="large">数据可见范围配置健康</el-tag>
+                  </template>
+                </el-result>
+              </template>
+            </template>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
@@ -165,7 +373,7 @@ import { useDataScopeStore } from '@/stores/dataScope'
 import { useUserStore } from '@/stores/user'
 import { courseApi, dataScopeApi } from '@/api'
 import { DataScopeLevel, RoleType, RoleLabels, DataScopeLabels } from '@/types'
-import type { Course } from '@/types'
+import type { Course, CrossRoleAuditResult } from '@/types'
 import {
   Globe,
   OfficeBuilding,
@@ -180,7 +388,10 @@ import {
   Edit,
   Crown,
   Reading,
-  School
+  School,
+  Monitor,
+  DataAnalysis,
+  RefreshRight
 } from '@element-plus/icons-vue'
 
 const dataScopeStore = useDataScopeStore()
@@ -217,6 +428,25 @@ const crossRoleReport = ref<any>(null)
 const selectedCourseId = ref<number | null>(null)
 const assertResult = ref<any>(null)
 
+const auditResult = ref<CrossRoleAuditResult | null>(null)
+const auditLoading = ref(false)
+
+const auditStatusTagType = computed(() => {
+  if (!auditResult.value) return 'info'
+  const s = auditResult.value.summary.overall_status
+  if (s === 'error') return 'danger'
+  if (s === 'warning') return 'warning'
+  return 'success'
+})
+
+const auditStatusLabel = computed(() => {
+  if (!auditResult.value) return ''
+  const s = auditResult.value.summary.overall_status
+  if (s === 'error') return '存在严重异常'
+  if (s === 'warning') return '存在警告'
+  return '核对通过'
+})
+
 function getVisibleCount(level: number): number {
   return visibleCounts[level] || 0
 }
@@ -235,6 +465,48 @@ function roleTagType(role: string): string {
 
 function getRoleLabel(role: string): string {
   return RoleLabels[role as RoleType] || role
+}
+
+function getDefaultScopeLabel(role: string | null): string {
+  const map: Record<string, string> = {
+    super_admin: DataScopeLabels[DataScopeLevel.ALL],
+    tenant_admin: DataScopeLabels[DataScopeLevel.TENANT],
+    dept_head: DataScopeLabels[DataScopeLevel.DEPARTMENT],
+    team_leader: DataScopeLabels[DataScopeLevel.TEAM],
+    teacher: DataScopeLabels[DataScopeLevel.SELF],
+    student: DataScopeLabels[DataScopeLevel.SELF],
+  }
+  return map[role || ''] || '-'
+}
+
+function anomalyLabel(anomaly: string | null): string {
+  if (!anomaly) return '正常'
+  const map: Record<string, string> = {
+    VISIBLE_MISMATCH_ACTUAL_VISIBLE: '越权泄露',
+    VISIBLE_MISMATCH_ACTUAL_HIDDEN: '可见性缺失',
+    CROSS_TENANT_LEAK: '跨租户泄露',
+    MODIFY_WITHOUT_VIEW: '可改不可见',
+    DEPT_SCOPE_OVERFLOW: '部门越界',
+    SCOPE_MISMATCH: '范围不一致',
+  }
+  return map[anomaly] || anomaly
+}
+
+function anomalyTypeLabel(type: string): string {
+  const map: Record<string, string> = {
+    VISIBLE_MISMATCH_ACTUAL_VISIBLE: '数据越权泄露',
+    VISIBLE_MISMATCH_ACTUAL_HIDDEN: '数据可见性缺失',
+    CROSS_TENANT_LEAK: '跨租户数据泄露',
+    MODIFY_WITHOUT_VIEW: '可修改但不可查看',
+    DEPT_SCOPE_OVERFLOW: '部门管辖范围越界',
+    SCOPE_MISMATCH: '数据可见范围与角色不一致',
+  }
+  return map[type] || type
+}
+
+function auditRowClassName({ row }: { row: any }): string {
+  if (row.anomaly) return 'audit-row-anomaly'
+  return ''
 }
 
 async function loadAllCourses() {
@@ -268,11 +540,24 @@ async function assertAccess(action: 'view' | 'modify') {
   } catch (e) {}
 }
 
+async function runAudit() {
+  auditLoading.value = true
+  try {
+    const res: any = await dataScopeApi.crossRoleAudit(allCourses.value, 'course')
+    auditResult.value = res.data
+  } catch (e) {
+    console.error('导出核对失败', e)
+  } finally {
+    auditLoading.value = false
+  }
+}
+
 watch(refreshKey, () => {
   loadAllCourses()
   loadCrossRoleFilter()
   crossRoleReport.value = null
   assertResult.value = null
+  auditResult.value = null
 })
 
 onMounted(async () => {
@@ -405,5 +690,22 @@ onMounted(async () => {
 .assert-result :deep(.el-result__icon) {
   margin: 0;
   font-size: 32px;
+}
+
+.audit-section {
+  padding: 4px 0;
+}
+
+.anomaly-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+:deep(.audit-row-anomaly) {
+  background-color: var(--el-color-danger-light-9) !important;
+}
+
+:deep(.audit-row-anomaly:hover > td) {
+  background-color: var(--el-color-danger-light-8) !important;
 }
 </style>

@@ -58,5 +58,9 @@ export const dataScopeApi = {
   },
   crossRoleFilter(targetRoles: string[] = []) {
     return request.post('/data-scope/cross-role-filter', { target_roles: targetRoles })
+  },
+
+  crossRoleAudit(resources: Record<string, any>[], resourceType: string = 'course') {
+    return request.post('/data-scope/cross-role-audit', { resources, resource_type: resourceType })
   }
 }

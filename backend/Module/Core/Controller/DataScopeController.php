@@ -79,4 +79,17 @@ class DataScopeController
             'target_roles_input' => $targetRoles,
         ];
     }
+
+    public function crossRoleAudit(array $request): array
+    {
+        $body = $request['body'] ?? [];
+        $resources = $body['resources'] ?? [];
+        $resourceType = $body['resource_type'] ?? 'resource';
+
+        if (empty($resources)) {
+            throw new ValidationException('缺少待核对的资源数据');
+        }
+
+        return $this->visibility->exportCrossRoleAudit($resources, $resourceType);
+    }
 }
