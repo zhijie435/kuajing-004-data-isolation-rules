@@ -585,7 +585,19 @@ const refreshKey = computed(() => refreshTrigger.value)
 const currentScopeLevel = computed(() => dataScopeStore.currentScope)
 
 const allCourses = ref<Course[]>([])
-const visibleCounts = reactive<Record<number, number>>({})
+const isInitialLoading = ref(true)
+
+const visibleCounts = computed<Record<number, number>>(() => {
+  const total = allCourses.value.length
+  const selfCount = allCourses.value.filter(c => c.owner_id === userStore.userInfo?.id).length
+  return {
+    [DataScopeLevel.SELF]: selfCount,
+    [DataScopeLevel.TEAM]: Math.min(total, 4),
+    [DataScopeLevel.DEPARTMENT]: Math.min(total, 6),
+    [DataScopeLevel.TENANT]: Math.min(total, 8),
+    [DataScopeLevel.ALL]: total
+  }
+})
 
 const scopeLevels = [
   { value: DataScopeLevel.ALL, label: 'Level 1 · 全部数据', description: '超级管理员专属，跨所有租户访问', icon: Globe },
@@ -645,7 +657,7 @@ const breakdownMatchesVisibleRoles = computed(() => {
 })
 
 function getVisibleCount(level: number): number {
-  return visibleCounts[level] || 0
+  return visibleCounts.value[level] || 0
 }
 
 function roleTagType(role: string): string {
@@ -784,14 +796,17 @@ async function applyFix() {
 }
 
 watch(refreshKey, () => {
-  loadAllCourses()
-  loadCrossRoleFilter()
+  targetRoles.value = []
+  visibleRoles.value = []
   crossRoleReport.value = null
+  selectedCourseId.value = null
   assertResult.value = null
   auditResult.value = null
   fixResult.value = null
   fixError.value = null
   fixRetryCount.value = 0
+  loadAllCourses()
+  loadCrossRoleFilter()
 })
 
 function resetAudit() {
@@ -805,12 +820,7 @@ onMounted(async () => {
   await dataScopeStore.fetchScopeSummary()
   await loadAllCourses()
   await loadCrossRoleFilter()
-
-  visibleCounts[DataScopeLevel.SELF] = allCourses.value.filter(c => c.owner_id === userStore.userInfo?.id).length
-  visibleCounts[DataScopeLevel.TEAM] = Math.min(allCourses.value.length, 4)
-  visibleCounts[DataScopeLevel.DEPARTMENT] = Math.min(allCourses.value.length, 6)
-  visibleCounts[DataScopeLevel.TENANT] = Math.min(allCourses.value.length, 8)
-  visibleCounts[DataScopeLevel.ALL] = allCourses.value.length
+  isInitialLoading.value = false
 })
 </script>
 

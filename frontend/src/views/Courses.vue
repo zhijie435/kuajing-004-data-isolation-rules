@@ -462,6 +462,13 @@ async function deleteCourse(row: Course) {
 }
 
 watch(refreshKey, () => {
+  showCreate.value = false
+  showDetail.value = false
+  showDebugDialog.value = false
+  detailCourse.value = null
+  editingId.value = null
+  editingRow.value = null
+  debugInfo.value = null
   loadCourses()
 })
 

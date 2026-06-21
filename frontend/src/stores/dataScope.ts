@@ -64,6 +64,7 @@ export const useDataScopeStore = defineStore('dataScope', {
       try {
         const res: any = await request.post('/data-scope/switch', { scope })
         this.currentScope = res.data.current_scope
+        await this.fetchScopeSummary()
         return res.data
       } finally {
         this.loading = false
