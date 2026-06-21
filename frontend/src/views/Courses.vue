@@ -108,7 +108,7 @@
           <template #default="{ row }">
             <el-tooltip
               v-if="!row._permissions?.can_view"
-              content="当前数据可见范围不足，无法查看"
+              content="权限不足：当前数据可见范围内无法查看该课程"
               placement="top"
             >
               <el-button link type="primary" disabled>查看</el-button>
@@ -119,7 +119,7 @@
 
             <el-tooltip
               v-if="!row._permissions?.can_edit"
-              content="需为课程负责人或具备管理权限"
+              content="权限不足：需为课程负责人或具备管理权限"
               placement="top"
             >
               <el-button link type="warning" disabled>编辑</el-button>
@@ -130,7 +130,7 @@
 
             <el-tooltip
               v-if="!row._permissions?.can_delete"
-              content="需为课程负责人或具备管理权限"
+              content="权限不足：需为课程负责人或具备管理权限"
               placement="top"
             >
               <el-button link type="danger" disabled>删除</el-button>
@@ -213,7 +213,7 @@
         <el-button @click="showDetail = false">关闭</el-button>
         <el-tooltip
           v-if="!detailCourse?._permissions?.can_edit"
-          content="需为课程负责人或具备管理权限"
+          content="权限不足：需为课程负责人或具备管理权限"
           placement="top"
         >
           <el-button type="primary" disabled>
@@ -385,7 +385,7 @@ async function submitForm() {
     await formRef.value.validate()
 
     if (isEditMode.value && editingRow.value && !editingRow.value._permissions?.can_edit) {
-      ElMessage.warning('您当前无权编辑此课程，权限可能已变更')
+      ElMessage.warning('权限不足：您当前无权编辑此课程，需为课程负责人或具备管理权限')
       showCreate.value = false
       await loadCourses()
       return
@@ -416,7 +416,7 @@ async function submitForm() {
 async function viewCourse(row: Course) {
   try {
     if (!row._permissions?.can_view) {
-      ElMessage.warning('当前数据可见范围不足，无法查看该课程')
+      ElMessage.warning('权限不足：当前数据可见范围内无法查看该课程')
       return
     }
     const res: any = await courseApi.getById(row.id)
@@ -438,7 +438,7 @@ function editFromDetail() {
 async function deleteCourse(row: Course) {
   try {
     if (!row._permissions?.can_delete) {
-      ElMessage.warning('无权限删除该课程：需为课程负责人或具备管理权限')
+      ElMessage.warning('权限不足：需为课程负责人或具备管理权限才能删除')
       return
     }
     await ElMessageBox.confirm(`确认删除课程【${row.title}】？`, '提示', {

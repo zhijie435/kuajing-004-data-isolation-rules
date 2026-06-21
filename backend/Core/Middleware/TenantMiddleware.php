@@ -116,7 +116,12 @@ class TenantMiddleware
     {
         return [
             'status' => 401,
-            'body' => json_encode(['code' => 401, 'message' => $msg, 'data' => null], JSON_UNESCAPED_UNICODE),
+            'body' => json_encode([
+                'code' => 401,
+                'error_code' => 'UNAUTHORIZED',
+                'message' => $msg,
+                'data' => null,
+            ], JSON_UNESCAPED_UNICODE),
         ];
     }
 
@@ -124,7 +129,12 @@ class TenantMiddleware
     {
         return [
             'status' => 403,
-            'body' => json_encode(['code' => 403, 'message' => $msg, 'data' => null], JSON_UNESCAPED_UNICODE),
+            'body' => json_encode([
+                'code' => 403,
+                'error_code' => 'FORBIDDEN',
+                'message' => $msg,
+                'data' => null,
+            ], JSON_UNESCAPED_UNICODE),
         ];
     }
 }

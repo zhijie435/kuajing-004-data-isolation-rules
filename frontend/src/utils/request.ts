@@ -20,20 +20,49 @@ const ERROR_CODE_MAP: Record<string, { title: string; type: 'error' | 'warning' 
   SERVER_ERROR: { title: '服务器错误', type: 'error' }
 }
 
+function formatContextTip(context: any): string {
+  if (!context || typeof context !== 'object') return ''
+
+  const lines: string[] = []
+  const labelMap: Record<string, string> = {
+    current_scope_label: '当前范围',
+    current_role_label: '当前角色',
+    current_user_id: '用户ID',
+    current_tenant_id: '租户ID',
+    current_dept_id: '部门ID',
+    resource_owner_id: '资源负责人',
+    resource_tenant_id: '资源租户',
+    resource_dept_id: '资源部门',
+    resource_id: '资源ID',
+    denial_reason: '拒绝原因',
+    detail: '详情',
+    target_scope: '目标范围',
+    available_scopes: '可用范围',
+  }
+
+  for (const [key, value] of Object.entries(context)) {
+    const label = labelMap[key] || key
+    if (value !== null && value !== undefined) {
+      const display = Array.isArray(value) ? value.join(', ') : String(value)
+      lines.push(`${label}：${display}`)
+    }
+  }
+
+  return lines.length > 0 ? '\n' + lines.join('；') : ''
+}
+
 function showStructuredError(status: number, data: any, fallbackMessage: string) {
   const errorCode = data?.error_code || 'SERVER_ERROR'
   const mapped = ERROR_CODE_MAP[errorCode] || { title: '操作失败', type: 'error' as const }
   const message = data?.message || fallbackMessage
 
   if (status === 403) {
-    const contextTip = data?.context
-      ? `\n详细信息：${JSON.stringify(data.context)}`
-      : ''
+    const contextTip = formatContextTip(data?.context)
     ElNotification({
       type: mapped.type,
       title: mapped.title,
       message: `${message}${contextTip}`,
-      duration: 5000,
+      duration: 6000,
       showClose: true
     })
   } else {

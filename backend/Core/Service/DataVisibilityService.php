@@ -165,26 +165,68 @@ class DataVisibilityService
     {
         if (!$this->canViewResource($resource)) {
             $ctx = $this->context;
-            throw (new ForbiddenException("无权查看该{$resourceName}：当前数据可见范围为「{$ctx->getDataScope()->label()}」"))
+            $scope = $ctx->getDataScope();
+            $reason = $this->explainVisibilityDenial($resource, $scope);
+            throw (new ForbiddenException("无权查看该{$resourceName}：{$reason}"))
                 ->setContext([
+                    'resource_id' => $resource['id'] ?? null,
                     'resource_owner_id' => $resource['owner_id'] ?? $resource['created_by'] ?? null,
                     'resource_tenant_id' => $resource['tenant_id'] ?? null,
+                    'resource_dept_id' => $resource['dept_id'] ?? null,
                     'current_user_id' => $ctx->getUserId(),
                     'current_role' => $ctx->getRole()?->value,
-                    'current_scope' => $ctx->getDataScope()->value,
+                    'current_role_label' => $ctx->getRole()?->label(),
+                    'current_scope' => $scope->value,
+                    'current_scope_label' => $scope->label(),
+                    'current_tenant_id' => $ctx->getTenantId(),
+                    'current_dept_id' => $ctx->getDeptId(),
+                    'denial_reason' => $reason,
                 ]);
         }
     }
 
     public function assertCanModify(array $resource, string $resourceName = '资源'): void
     {
-        if (!$this->canModifyResource($resource)) {
-            $ctx = $this->context;
-            throw (new ForbiddenException("无权修改该{$resourceName}：需为负责人或具备管理权限"))
+        $ctx = $this->context;
+        $scope = $ctx->getDataScope();
+
+        if (!$this->canViewResource($resource)) {
+            $reason = $this->explainVisibilityDenial($resource, $scope);
+            throw (new ForbiddenException("无权修改该{$resourceName}：{$reason}"))
                 ->setContext([
+                    'resource_id' => $resource['id'] ?? null,
                     'resource_owner_id' => $resource['owner_id'] ?? $resource['created_by'] ?? null,
+                    'resource_tenant_id' => $resource['tenant_id'] ?? null,
                     'current_user_id' => $ctx->getUserId(),
                     'current_role' => $ctx->getRole()?->value,
+                    'current_role_label' => $ctx->getRole()?->label(),
+                    'current_scope' => $scope->value,
+                    'current_scope_label' => $scope->label(),
+                    'denial_reason' => 'resource_not_visible',
+                    'detail' => $reason,
+                ]);
+        }
+
+        if (!$this->canModifyResource($resource)) {
+            $ownerId = $resource['owner_id'] ?? $resource['created_by'] ?? null;
+            $role = $ctx->getRole();
+            $reason = '需为资源负责人或具备管理权限';
+            if ($role === RoleType::TEAM_LEADER) {
+                $reason = '团队负责人仅可修改本团队成员的资源';
+            } elseif ($role === RoleType::TEACHER || $role === RoleType::STUDENT) {
+                $reason = '仅可修改自己创建或负责的资源';
+            }
+            throw (new ForbiddenException("无权修改该{$resourceName}：{$reason}"))
+                ->setContext([
+                    'resource_id' => $resource['id'] ?? null,
+                    'resource_owner_id' => $ownerId,
+                    'current_user_id' => $ctx->getUserId(),
+                    'current_role' => $role?->value,
+                    'current_role_label' => $role?->label(),
+                    'current_scope' => $scope->value,
+                    'current_scope_label' => $scope->label(),
+                    'denial_reason' => 'not_owner_or_admin',
+                    'detail' => $reason,
                 ]);
         }
     }
@@ -532,6 +574,20 @@ class DataVisibilityService
             default => ($resource['owner_id'] ?? null) == $this->context->getUserId()
                 || ($resource['created_by'] ?? null) == $this->context->getUserId()
                 || ($resource['user_id'] ?? null) == $this->context->getUserId(),
+        };
+    }
+
+    private function explainVisibilityDenial(array $resource, DataScopeLevel $scope): string
+    {
+        $ctx = $this->context;
+
+        return match ($scope) {
+            DataScopeLevel::ALL => '当前可见范围为全部数据但仍无法查看，请检查数据完整性',
+            DataScopeLevel::TENANT => '资源不属于当前租户',
+            DataScopeLevel::DEPARTMENT => '资源不属于当前用户管辖的部门范围',
+            DataScopeLevel::TEAM => '资源负责人不在当前团队成员中',
+            DataScopeLevel::SELF => '资源非当前用户创建或负责',
+            default => '当前数据可见范围为「' . $scope->label() . '」，无法查看该资源',
         };
     }
 
