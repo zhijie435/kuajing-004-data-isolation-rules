@@ -245,10 +245,90 @@
               <el-button type="primary" @click="runAudit" :loading="auditLoading">
                 <el-icon><DataAnalysis /></el-icon> 执行导出核对
               </el-button>
-              <el-button @click="auditResult = null" :disabled="!auditResult">
+              <el-button
+                type="warning"
+                @click="applyFix"
+                :loading="fixLoading"
+                :disabled="!auditResult || auditResult.summary.overall_status === 'healthy'"
+              >
+                <el-icon><Edit /></el-icon> 一键修正并回写
+              </el-button>
+              <el-button @click="auditResult = null; fixResult = null" :disabled="!auditResult && !fixResult">
                 <el-icon><RefreshRight /></el-icon> 重置
               </el-button>
             </div>
+
+            <el-alert
+              v-if="fixResult"
+              :type="fixResult.auto_corrected_count > 0 ? 'success' : 'warning'"
+              show-icon
+              :closable="false"
+              style="margin-bottom: 16px"
+            >
+              <template #title>
+                <span style="font-weight: 600">修正完成</span>
+                <el-tag
+                  :type="fixResult.auto_corrected_count > 0 ? 'success' : 'warning'"
+                  size="small"
+                  effect="dark"
+                  style="margin-left: 8px"
+                >
+                  自动修正 {{ fixResult.auto_corrected_count }} / {{ fixResult.total_fixes }} 项
+                </el-tag>
+              </template>
+              <div v-if="fixResult.scope_fix" style="margin-top: 4px">
+                <div v-if="fixResult.scope_fix.corrected">
+                  可见范围已回写：{{ fixResult.scope_fix.previous_scope_label }} → {{ fixResult.scope_fix.corrected_scope_label }}
+                </div>
+                <div v-else style="color: var(--el-color-warning)">
+                  {{ fixResult.scope_fix.message }}
+                </div>
+              </div>
+            </el-alert>
+
+            <el-table
+              v-if="fixResult && fixResult.fixes_applied?.length"
+              :data="fixResult.fixes_applied"
+              size="small"
+              style="margin-bottom: 16px"
+            >
+              <el-table-column prop="type" label="异常类型" width="180">
+                <template #default="{ row }">
+                  {{ anomalyTypeLabel(row.type) }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="action" label="修正动作" width="180" />
+              <el-table-column label="修正结果" min-width="280">
+                <template #default="{ row }">
+                  <el-tag :type="row.result.corrected ? 'success' : 'warning'" size="small" effect="dark" style="margin-right: 6px">
+                    {{ row.result.corrected ? '已修正' : '待人工' }}
+                  </el-tag>
+                  {{ row.result.message }}
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <el-descriptions
+              v-if="fixResult && fixResult.re_audit_summary"
+              :column="3"
+              border
+              size="small"
+              style="margin-bottom: 16px"
+            >
+              <el-descriptions-item label="修正后状态">
+                <el-tag :type="fixResult.re_audit_summary.overall_status === 'healthy' ? 'success' : fixResult.re_audit_summary.overall_status === 'warning' ? 'warning' : 'danger'" effect="dark">
+                  {{ fixResult.re_audit_summary.overall_status === 'healthy' ? '健康' : fixResult.re_audit_summary.overall_status === 'warning' ? '警告' : '异常' }}
+                </el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="修正后异常数">
+                {{ fixResult.re_audit_summary.anomaly_count }}
+              </el-descriptions-item>
+              <el-descriptions-item label="可见数一致">
+                <el-tag :type="fixResult.re_audit_summary.visible_count_match ? 'success' : 'danger'" size="small">
+                  {{ fixResult.re_audit_summary.visible_count_match ? '一致' : '不一致' }}
+                </el-tag>
+              </el-descriptions-item>
+            </el-descriptions>
 
             <template v-if="auditResult">
               <el-row :gutter="16" style="margin-bottom: 16px">
@@ -430,7 +510,7 @@ import { useDataScopeStore } from '@/stores/dataScope'
 import { useUserStore } from '@/stores/user'
 import { courseApi, dataScopeApi } from '@/api'
 import { DataScopeLevel, RoleType, RoleLabels, DataScopeLabels } from '@/types'
-import type { Course, CrossRoleAuditResult } from '@/types'
+import type { Course, CrossRoleAuditResult, AuditFixResult } from '@/types'
 import {
   Globe,
   OfficeBuilding,
@@ -487,6 +567,8 @@ const assertResult = ref<any>(null)
 
 const auditResult = ref<CrossRoleAuditResult | null>(null)
 const auditLoading = ref(false)
+const fixResult = ref<AuditFixResult | null>(null)
+const fixLoading = ref(false)
 
 const auditStatusTagType = computed(() => {
   if (!auditResult.value) return 'info'
@@ -610,6 +692,7 @@ async function assertAccess(action: 'view' | 'modify') {
 
 async function runAudit() {
   auditLoading.value = true
+  fixResult.value = null
   try {
     const res: any = await dataScopeApi.crossRoleAudit(allCourses.value, 'course')
     auditResult.value = res.data
@@ -620,12 +703,30 @@ async function runAudit() {
   }
 }
 
+async function applyFix() {
+  if (!auditResult.value) return
+  fixLoading.value = true
+  try {
+    const fixData = await dataScopeStore.applyAuditFix(auditResult.value)
+    fixResult.value = fixData
+    if (fixData.scope_fix?.corrected) {
+      await dataScopeStore.fetchScopeSummary()
+      await loadAllCourses()
+    }
+  } catch (e) {
+    console.error('修正失败', e)
+  } finally {
+    fixLoading.value = false
+  }
+}
+
 watch(refreshKey, () => {
   loadAllCourses()
   loadCrossRoleFilter()
   crossRoleReport.value = null
   assertResult.value = null
   auditResult.value = null
+  fixResult.value = null
 })
 
 onMounted(async () => {

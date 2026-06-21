@@ -92,4 +92,16 @@ class DataScopeController
 
         return $this->visibility->exportCrossRoleAudit($resources, $resourceType);
     }
+
+    public function auditFix(array $request): array
+    {
+        $body = $request['body'] ?? [];
+        $auditResult = $body['audit_result'] ?? null;
+
+        if ($auditResult === null) {
+            throw new ValidationException('缺少审核结果数据');
+        }
+
+        return $this->visibility->applyCrossRoleAuditFix($auditResult);
+    }
 }

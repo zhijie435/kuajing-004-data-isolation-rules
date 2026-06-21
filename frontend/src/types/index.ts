@@ -175,3 +175,35 @@ export interface CrossRoleAuditResult {
   audited_resources: AuditedResource[]
   anomalies: AuditAnomaly[]
 }
+
+export interface AuditFixItem {
+  type: string
+  action: string
+  result: {
+    corrected: boolean
+    reason?: string
+    message: string
+    previous_scope?: number
+    previous_scope_label?: string
+    corrected_scope?: number
+    corrected_scope_label?: string
+    resource_id?: number | null
+  }
+}
+
+export interface AuditFixResult {
+  fixes_applied: AuditFixItem[]
+  scope_fix: {
+    corrected: boolean
+    reason?: string
+    message: string
+    previous_scope?: number
+    previous_scope_label?: string
+    corrected_scope?: number
+    corrected_scope_label?: string
+  } | null
+  context_after_fix: Record<string, any>
+  re_audit_summary: AuditSummary | null
+  total_fixes: number
+  auto_corrected_count: number
+}

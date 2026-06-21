@@ -705,7 +705,152 @@ foreach ($consistencyCases as $case) {
 }
 
 echo str_repeat('=', 60) . "\n";
-echo $allPassed ? "🎉 全部测试通过！包括跨角色筛选明细一致性！\n" : "⚠️ 存在测试失败，请检查实现\n";
+echo "▶ 审核回写状态流转测试\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$writeBackCases = [
+    [
+        'name' => '11.1 讲师scope被切到租户级→审核检测→回写修正→状态正确流转',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 202, 'username' => 'teacher_zhang',
+            'role' => 'teacher', 'dept_id' => 2, 'team_id' => 101,
+            'data_scope' => 2,
+        ],
+        'expect_before_mismatch' => true,
+        'expect_fix_corrected' => true,
+        'expect_scope_after' => DataScopeLevel::SELF->value,
+        'expect_re_audit_healthy' => true,
+    ],
+    [
+        'name' => '11.2 部门主管scope正常→审核无异常→回写无需修正',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 102, 'username' => 'dept_chinese',
+            'role' => 'dept_head', 'dept_id' => 4, 'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+        'expect_before_mismatch' => false,
+        'expect_fix_corrected' => false,
+    ],
+    [
+        'name' => '11.3 团队负责人scope被切到全部→审核检测→回写修正到TEAM',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 201, 'username' => 'team_leader_1',
+            'role' => 'team_leader', 'dept_id' => 4, 'team_id' => 101,
+            'team_member_ids' => [101, 202, 203, 204],
+            'data_scope' => 1,
+        ],
+        'expect_before_mismatch' => true,
+        'expect_fix_corrected' => true,
+        'expect_scope_after' => DataScopeLevel::TEAM->value,
+        'expect_re_audit_healthy' => true,
+    ],
+];
+
+$auditResources = array_values(CourseModel::mockData());
+
+foreach ($writeBackCases as $case) {
+    echo "▶ {$case['name']}\n";
+
+    $ctx->reset();
+    $ctx->bootstrap($case['ctx']);
+
+    $beforeScope = $ctx->getDataScope()->value;
+    $beforeScopeLabel = $ctx->getDataScope()->label();
+    $roleDefaultScope = $ctx->getRole()?->defaultDataScope()->value;
+    $roleDefaultScopeLabel = $ctx->getRole()?->defaultDataScope()->label();
+
+    echo "  修正前: scope={$beforeScopeLabel}({$beforeScope}), 角色默认={$roleDefaultScopeLabel}({$roleDefaultScope})\n";
+
+    $auditOutput = $svc->exportCrossRoleAudit($auditResources, 'course');
+    $scopeMismatch = $auditOutput['context']['scope_mismatch'];
+    echo "  审核scope_mismatch: " . ($scopeMismatch ? 'true' : 'false') . "\n";
+
+    $casePassed = true;
+
+    if (isset($case['expect_before_mismatch'])) {
+        if ($scopeMismatch !== $case['expect_before_mismatch']) {
+            echo "  ❌ 审核scope_mismatch不符: 预期=" . ($case['expect_before_mismatch'] ? 'true' : 'false') . ", 实际=" . ($scopeMismatch ? 'true' : 'false') . "\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 审核scope_mismatch检测正确\n";
+        }
+    }
+
+    $fixOutput = $svc->applyCrossRoleAuditFix($auditOutput);
+    $scopeFixCorrected = $fixOutput['scope_fix']['corrected'] ?? false;
+    echo "  回写修正: corrected=" . ($scopeFixCorrected ? 'true' : 'false') . "\n";
+
+    if (isset($case['expect_fix_corrected'])) {
+        if ($scopeFixCorrected !== $case['expect_fix_corrected']) {
+            echo "  ❌ 回写修正结果不符: 预期=" . ($case['expect_fix_corrected'] ? 'true' : 'false') . ", 实际=" . ($scopeFixCorrected ? 'true' : 'false') . "\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 回写修正结果正确\n";
+        }
+    }
+
+    $afterScope = $ctx->getDataScope()->value;
+    $afterScopeLabel = $ctx->getDataScope()->label();
+    echo "  修正后: scope={$afterScopeLabel}({$afterScope})\n";
+
+    if (isset($case['expect_scope_after'])) {
+        if ($afterScope !== $case['expect_scope_after']) {
+            echo "  ❌ 修正后scope不符: 预期={$case['expect_scope_after']}, 实际={$afterScope}\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 修正后scope正确\n";
+        }
+    }
+
+    echo "  isScopeCorrected: " . ($ctx->isScopeCorrected() ? 'true' : 'false') . "\n";
+    echo "  lastAuditScope: " . ($ctx->getLastAuditScope()?->label() ?? 'null') . "\n";
+
+    if ($scopeFixCorrected) {
+        if (!$ctx->isScopeCorrected()) {
+            echo "  ❌ isScopeCorrected 应为 true\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ isScopeCorrected 标记正确\n";
+        }
+
+        if ($ctx->getLastAuditScope()?->value !== $case['ctx']['data_scope'] ?? DataScopeLevel::SELF->value) {
+            if (isset($case['ctx']['data_scope'])) {
+                echo "  ❌ lastAuditScope 未记录修正前的scope\n";
+                $casePassed = false;
+            }
+        } else {
+            echo "  ✅ lastAuditScope 记录了修正前scope\n";
+        }
+    }
+
+    if (isset($case['expect_re_audit_healthy']) && $case['expect_re_audit_healthy']) {
+        $reAuditResources = [];
+        foreach ($auditOutput['audited_resources'] as $ar) {
+            $reAuditResources[] = [
+                'id' => $ar['id'],
+                'title' => $ar['title'],
+                'owner_id' => $ar['owner_id'],
+                'tenant_id' => $ar['tenant_id'],
+                'dept_id' => $ar['dept_id'],
+            ];
+        }
+        $reAudit = $svc->exportCrossRoleAudit($reAuditResources, 'course');
+        $reStatus = $reAudit['summary']['overall_status'];
+        echo "  修正后重新审核状态: {$reStatus}\n";
+        if ($reStatus !== 'healthy') {
+            echo "  ❌ 修正后重新审核状态应为healthy\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 修正后重新审核状态正确\n";
+        }
+    }
+
+    echo "  → 结果: " . ($casePassed ? '✅ PASS' : '❌ FAIL') . "\n\n";
+    if (!$casePassed) $allPassed = false;
+}
+
+echo str_repeat('=', 60) . "\n";
+echo $allPassed ? "🎉 全部测试通过！包括审核回写状态流转！\n" : "⚠️ 存在测试失败，请检查实现\n";
 echo str_repeat('=', 60) . "\n";
 
 echo "\n📌 架构总结：\n";

@@ -70,6 +70,30 @@ export const useDataScopeStore = defineStore('dataScope', {
       }
     },
 
+    async applyAuditFix(auditResult: Record<string, any>) {
+      this.loading = true
+      try {
+        const res: any = await request.post('/data-scope/audit-fix', { audit_result: auditResult })
+        const fixData = res.data
+
+        if (fixData.scope_fix?.corrected && fixData.context_after_fix) {
+          this.currentScope = fixData.context_after_fix.data_scope
+          this.scopeSummary = {
+            ...this.scopeSummary,
+            data_scope: {
+              ...this.scopeSummary?.data_scope,
+              current: fixData.context_after_fix.data_scope,
+              current_label: fixData.context_after_fix.data_scope_label,
+            }
+          } as any
+        }
+
+        return fixData
+      } finally {
+        this.loading = false
+      }
+    },
+
     async checkResourceAccess(resource: Record<string, any>, action: 'view' | 'modify' = 'view') {
       const res: any = await request.post('/data-scope/check-access', {
         resource,

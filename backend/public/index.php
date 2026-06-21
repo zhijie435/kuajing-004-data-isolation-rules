@@ -65,6 +65,12 @@ $router->group('/api', [new TenantMiddleware()], function (Router $r) {
         return (new App\Module\Core\Controller\DataScopeController())->crossRoleAudit($req);
     });
 
+    $r->post('/data-scope/audit-fix', function ($req) {
+        $body = json_decode(file_get_contents('php://input'), true) ?: [];
+        $req['body'] = $body;
+        return (new App\Module\Core\Controller\DataScopeController())->auditFix($req);
+    });
+
     $r->get('/courses', function ($req) {
         $req['query'] = $_GET ?? [];
         return (new App\Module\Course\Controller\CourseController())->index($req);

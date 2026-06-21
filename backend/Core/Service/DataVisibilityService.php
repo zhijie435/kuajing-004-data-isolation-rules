@@ -547,4 +547,161 @@ class DataVisibilityService
             'team_id' => $this->context->getTeamId(),
         ];
     }
+
+    public function applyAuditWriteBack(): array
+    {
+        $ctx = $this->context;
+        $role = $ctx->getRole();
+        $currentScope = $ctx->getDataScope();
+
+        if ($role === null) {
+            return [
+                'corrected' => false,
+                'reason' => 'no_role',
+                'message' => '当前无角色信息，无法回写',
+            ];
+        }
+
+        $defaultScope = $role->defaultDataScope();
+
+        if ($currentScope->value === $defaultScope->value) {
+            return [
+                'corrected' => false,
+                'reason' => 'already_correct',
+                'message' => '当前可见范围与角色默认范围一致，无需回写',
+                'current_scope' => $currentScope->value,
+                'current_scope_label' => $currentScope->label(),
+                'default_scope' => $defaultScope->value,
+                'default_scope_label' => $defaultScope->label(),
+            ];
+        }
+
+        $previousScope = $currentScope;
+        $ctx->writeBackScope($defaultScope);
+
+        return [
+            'corrected' => true,
+            'reason' => 'scope_mismatch_fixed',
+            'message' => "已将可见范围从「{$previousScope->label()}」回写修正为「{$defaultScope->label()}」",
+            'previous_scope' => $previousScope->value,
+            'previous_scope_label' => $previousScope->label(),
+            'corrected_scope' => $defaultScope->value,
+            'corrected_scope_label' => $defaultScope->label(),
+            'role' => $role->value,
+            'role_label' => $role->label(),
+        ];
+    }
+
+    public function applyCrossRoleAuditFix(array $auditResult): array
+    {
+        $ctx = $this->context;
+        $fixes = [];
+        $scopeFix = null;
+
+        foreach ($auditResult['anomalies'] ?? [] as $anomaly) {
+            switch ($anomaly['type']) {
+                case 'SCOPE_MISMATCH':
+                    $scopeFix = $this->applyAuditWriteBack();
+                    $fixes[] = [
+                        'type' => 'SCOPE_MISMATCH',
+                        'action' => 'scope_write_back',
+                        'result' => $scopeFix,
+                    ];
+                    break;
+
+                case 'CROSS_TENANT_LEAK':
+                    $fixes[] = [
+                        'type' => 'CROSS_TENANT_LEAK',
+                        'action' => 'flag_for_manual_review',
+                        'result' => [
+                            'corrected' => false,
+                            'reason' => 'requires_manual_intervention',
+                            'message' => "跨租户泄露需人工审查，资源#{$anomaly['resource_id']}可能需要隔离或权限回收",
+                            'resource_id' => $anomaly['resource_id'],
+                        ],
+                    ];
+                    break;
+
+                case 'VISIBLE_MISMATCH_ACTUAL_VISIBLE':
+                    $fixes[] = [
+                        'type' => 'VISIBLE_MISMATCH_ACTUAL_VISIBLE',
+                        'action' => 'scope_corrected_by_write_back',
+                        'result' => [
+                            'corrected' => $scopeFix ? $scopeFix['corrected'] : false,
+                            'message' => $scopeFix
+                                ? $scopeFix['message']
+                                : '需先修正可见范围偏差后重新核对',
+                            'resource_id' => $anomaly['resource_id'],
+                        ],
+                    ];
+                    break;
+
+                case 'VISIBLE_MISMATCH_ACTUAL_HIDDEN':
+                    $fixes[] = [
+                        'type' => 'VISIBLE_MISMATCH_ACTUAL_HIDDEN',
+                        'action' => 'visibility_gap_noted',
+                        'result' => [
+                            'corrected' => false,
+                            'reason' => 'scope_too_narrow',
+                            'message' => "资源#{$anomaly['resource_id']}按角色默认范围应可见但实际不可见，可见范围可能被过度缩窄",
+                            'resource_id' => $anomaly['resource_id'],
+                        ],
+                    ];
+                    break;
+
+                case 'DEPT_SCOPE_OVERFLOW':
+                    $fixes[] = [
+                        'type' => 'DEPT_SCOPE_OVERFLOW',
+                        'action' => 'dept_scope_noted',
+                        'result' => [
+                            'corrected' => false,
+                            'reason' => 'dept_hierarchy_issue',
+                            'message' => "资源#{$anomaly['resource_id']}部门范围越界，需检查部门树配置",
+                            'resource_id' => $anomaly['resource_id'],
+                        ],
+                    ];
+                    break;
+
+                case 'MODIFY_WITHOUT_VIEW':
+                    $fixes[] = [
+                        'type' => 'MODIFY_WITHOUT_VIEW',
+                        'action' => 'permission_config_noted',
+                        'result' => [
+                            'corrected' => false,
+                            'reason' => 'permission_asymmetry',
+                            'message' => "资源#{$anomaly['resource_id']}可修改但不可查看，权限配置异常",
+                            'resource_id' => $anomaly['resource_id'],
+                        ],
+                    ];
+                    break;
+            }
+        }
+
+        $reAuditSummary = null;
+        if ($scopeFix && $scopeFix['corrected']) {
+            $reAuditResources = [];
+            foreach ($auditResult['audited_resources'] ?? [] as $ar) {
+                $reAuditResources[] = [
+                    'id' => $ar['id'],
+                    'title' => $ar['title'],
+                    'owner_id' => $ar['owner_id'],
+                    'tenant_id' => $ar['tenant_id'],
+                    'dept_id' => $ar['dept_id'],
+                ];
+            }
+            if (!empty($reAuditResources)) {
+                $reAuditResult = $this->exportCrossRoleAudit($reAuditResources, $auditResult['context']['role'] ?? 'resource');
+                $reAuditSummary = $reAuditResult['summary'];
+            }
+        }
+
+        return [
+            'fixes_applied' => $fixes,
+            'scope_fix' => $scopeFix,
+            'context_after_fix' => $ctx->toArray(),
+            're_audit_summary' => $reAuditSummary,
+            'total_fixes' => count($fixes),
+            'auto_corrected_count' => count(array_filter($fixes, fn($f) => ($f['result']['corrected'] ?? false) === true)),
+        ];
+    }
 }

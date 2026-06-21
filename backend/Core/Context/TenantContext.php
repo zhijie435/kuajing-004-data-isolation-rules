@@ -19,6 +19,8 @@ class TenantContext
     private ?int $teamId = null;
     private array $deptChildIds = [];
     private array $teamMemberIds = [];
+    private ?DataScopeLevel $lastAuditScope = null;
+    private bool $scopeCorrected = false;
 
     private function __construct() {}
 
@@ -119,6 +121,25 @@ class TenantContext
         $this->teamId = null;
         $this->deptChildIds = [];
         $this->teamMemberIds = [];
+        $this->lastAuditScope = null;
+        $this->scopeCorrected = false;
+    }
+
+    public function writeBackScope(DataScopeLevel $correctScope): void
+    {
+        $this->lastAuditScope = $this->dataScope;
+        $this->dataScope = $correctScope;
+        $this->scopeCorrected = true;
+    }
+
+    public function getLastAuditScope(): ?DataScopeLevel
+    {
+        return $this->lastAuditScope;
+    }
+
+    public function isScopeCorrected(): bool
+    {
+        return $this->scopeCorrected;
     }
 
     public function toArray(): array
@@ -133,6 +154,9 @@ class TenantContext
             'data_scope_label' => $this->dataScope?->label(),
             'dept_id' => $this->deptId,
             'team_id' => $this->teamId,
+            'last_audit_scope' => $this->lastAuditScope?->value,
+            'last_audit_scope_label' => $this->lastAuditScope?->label(),
+            'scope_corrected' => $this->scopeCorrected,
         ];
     }
 }

@@ -62,5 +62,9 @@ export const dataScopeApi = {
 
   crossRoleAudit(resources: Record<string, any>[], resourceType: string = 'course') {
     return request.post('/data-scope/cross-role-audit', { resources, resource_type: resourceType })
+  },
+
+  auditFix(auditResult: Record<string, any>) {
+    return request.post('/data-scope/audit-fix', { audit_result: auditResult })
   }
 }
