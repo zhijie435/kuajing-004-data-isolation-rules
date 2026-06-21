@@ -241,7 +241,7 @@
               style="margin-bottom: 16px"
             />
 
-            <div class="audit-actions" style="display: flex; gap: 12px; margin-bottom: 16px">
+            <div class="audit-actions" style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; align-items: center">
               <el-button type="primary" @click="runAudit" :loading="auditLoading">
                 <el-icon><DataAnalysis /></el-icon> 执行导出核对
               </el-button>
@@ -253,10 +253,54 @@
               >
                 <el-icon><Edit /></el-icon> 一键修正并回写
               </el-button>
-              <el-button @click="auditResult = null; fixResult = null" :disabled="!auditResult && !fixResult">
+              <el-button
+                v-if="fixError"
+                type="danger"
+                @click="applyFix"
+                :loading="fixLoading"
+              >
+                <el-icon><RefreshRight /></el-icon>
+                重试提交
+                <el-tag v-if="fixRetryCount > 0" type="danger" size="small" effect="plain" style="margin-left: 4px">
+                  第 {{ fixRetryCount }} 次
+                </el-tag>
+              </el-button>
+              <el-button @click="resetAudit" :disabled="!auditResult && !fixResult && !fixError">
                 <el-icon><RefreshRight /></el-icon> 重置
               </el-button>
             </div>
+
+            <el-alert
+              v-if="fixError"
+              type="error"
+              show-icon
+              :closable="false"
+              style="margin-bottom: 16px"
+            >
+              <template #title>
+                <span style="font-weight: 600">修正提交失败</span>
+                <el-tag type="danger" size="small" effect="dark" style="margin-left: 8px">
+                  数据未回滚
+                </el-tag>
+              </template>
+              <div style="margin-top: 4px">
+                <div>错误信息：{{ fixError }}</div>
+                <div style="margin-top: 6px; color: var(--el-text-color-secondary); font-size: 13px">
+                  当前核对结果已保留，未做任何修改。您可以：
+                </div>
+                <div style="margin-top: 4px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+                  <el-button size="small" type="danger" plain @click="applyFix" :loading="fixLoading">
+                    <el-icon><RefreshRight /></el-icon> 立即重试
+                  </el-button>
+                  <el-button size="small" @click="runAudit" :loading="auditLoading">
+                    <el-icon><DataAnalysis /></el-icon> 重新核对
+                  </el-button>
+                  <el-button size="small" text @click="fixError = null">
+                    关闭提示
+                  </el-button>
+                </div>
+              </div>
+            </el-alert>
 
             <el-alert
               v-if="fixResult"
@@ -511,6 +555,7 @@ import { useUserStore } from '@/stores/user'
 import { courseApi, dataScopeApi } from '@/api'
 import { DataScopeLevel, RoleType, RoleLabels, DataScopeLabels } from '@/types'
 import type { Course, CrossRoleAuditResult, AuditFixResult } from '@/types'
+import { ElMessageBox } from 'element-plus'
 import {
   Globe,
   OfficeBuilding,
@@ -569,6 +614,8 @@ const auditResult = ref<CrossRoleAuditResult | null>(null)
 const auditLoading = ref(false)
 const fixResult = ref<AuditFixResult | null>(null)
 const fixLoading = ref(false)
+const fixError = ref<string | null>(null)
+const fixRetryCount = ref(0)
 
 const auditStatusTagType = computed(() => {
   if (!auditResult.value) return 'info'
@@ -706,15 +753,31 @@ async function runAudit() {
 async function applyFix() {
   if (!auditResult.value) return
   fixLoading.value = true
+  fixError.value = null
   try {
     const fixData = await dataScopeStore.applyAuditFix(auditResult.value)
     fixResult.value = fixData
+    fixRetryCount.value = 0
     if (fixData.scope_fix?.corrected) {
       await dataScopeStore.fetchScopeSummary()
       await loadAllCourses()
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('修正失败', e)
+    fixRetryCount.value++
+    const errorMsg = e?.message || e?.response?.data?.message || '网络或服务器异常'
+    fixError.value = errorMsg
+
+    ElMessageBox.alert(
+      `修正提交失败，已为您保留当前核对结果，可点击下方「重试」按钮再次提交。\n\n错误详情：${errorMsg}`,
+      '修正失败',
+      {
+        confirmButtonText: '知道了',
+        type: 'error',
+        showClose: true,
+        dangerouslyUseHTMLString: false
+      }
+    ).catch(() => {})
   } finally {
     fixLoading.value = false
   }
@@ -727,7 +790,16 @@ watch(refreshKey, () => {
   assertResult.value = null
   auditResult.value = null
   fixResult.value = null
+  fixError.value = null
+  fixRetryCount.value = 0
 })
+
+function resetAudit() {
+  auditResult.value = null
+  fixResult.value = null
+  fixError.value = null
+  fixRetryCount.value = 0
+}
 
 onMounted(async () => {
   await dataScopeStore.fetchScopeSummary()
