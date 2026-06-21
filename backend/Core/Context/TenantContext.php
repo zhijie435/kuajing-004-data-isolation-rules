@@ -75,14 +75,30 @@ class TenantContext
 
     public function setDataScope(DataScopeLevel $scope): void
     {
-        if ($this->role && $scope->gte($this->role->defaultDataScope())) {
-            throw (new ForbiddenException('越权设置数据可见范围'))
+        if (!$this->role) {
+            $this->dataScope = $scope;
+            return;
+        }
+
+        $defaultScope = $this->role->defaultDataScope();
+
+        if ($this->isScopeWiderThanAllowed($scope, $defaultScope)) {
+            throw (new ForbiddenException('越权设置数据可见范围：无权扩大数据可见范围'))
                 ->setContext([
                     'requested_scope' => $scope->value,
-                    'role_default_scope' => $this->role->defaultDataScope()->value,
+                    'requested_scope_label' => $scope->label(),
+                    'role_default_scope' => $defaultScope->value,
+                    'role_default_scope_label' => $defaultScope->label(),
+                    'hint' => '仅可设置比角色默认范围更小或相等的数据可见范围',
                 ]);
         }
+
         $this->dataScope = $scope;
+    }
+
+    private function isScopeWiderThanAllowed(DataScopeLevel $requested, DataScopeLevel $default): bool
+    {
+        return $requested->value < $default->value;
     }
 
     public function getDeptId(): ?int
