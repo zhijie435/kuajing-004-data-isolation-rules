@@ -1,0 +1,874 @@
+<?php
+
+require_once __DIR__ . '/autoload.php';
+
+use App\Core\Context\TenantContext;
+use App\Core\Enum\DataScopeLevel;
+use App\Core\Enum\RoleType;
+use App\Core\Orm\TenantScope;
+use App\Core\Service\DataVisibilityService;
+use App\Core\Database\QueryBuilder;
+use App\Module\Course\Model\CourseModel;
+use App\Core\Storage\InMemoryDataStore;
+
+echo "========================================\n";
+echo "  租户数据隔离过滤器 - 验证测试套件\n";
+echo "========================================\n\n";
+
+$testCases = [
+    [
+        'name' => '1. 超级管理员 + 全部数据范围',
+        'payload' => [
+            'tenant_id' => null,
+            'user_id' => 999,
+            'username' => 'super_admin',
+            'role' => 'super_admin',
+            'dept_id' => null,
+            'team_id' => null,
+        ],
+        'expect' => '无额外 WHERE 条件，所有租户数据可见',
+    ],
+    [
+        'name' => '2. 租户管理员(华夏) + 本租户范围',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 101,
+            'username' => 'admin_huaxia',
+            'role' => 'tenant_admin',
+            'dept_id' => 1,
+            'team_id' => null,
+        ],
+        'expect' => 'WHERE tenant_id = 1，仅华夏教育数据可见',
+    ],
+    [
+        'name' => '3. 部门主管(语文部 dept_id=4) + 部门级',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 102,
+            'username' => 'dept_chinese',
+            'role' => 'dept_head',
+            'dept_id' => 4,
+            'team_id' => 101,
+        ],
+        'expect' => 'WHERE tenant_id=1 AND dept_id IN (4,6,7)，语文部+小学语文+中学语文',
+    ],
+    [
+        'name' => '4. 团队负责人(team_id=101) + 团队级',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 201,
+            'username' => 'team_leader_1',
+            'role' => 'team_leader',
+            'dept_id' => 4,
+            'team_id' => 101,
+        ],
+        'expect' => 'WHERE tenant_id=1 AND owner_id IN (101,202,203,204)',
+    ],
+    [
+        'name' => '5. 普通讲师张老师 + 仅本人',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 202,
+            'username' => 'teacher_zhang',
+            'role' => 'teacher',
+            'dept_id' => 2,
+            'team_id' => 101,
+        ],
+        'expect' => 'WHERE tenant_id=1 AND (owner_id=202 OR created_by=202)',
+    ],
+    [
+        'name' => '6. 学员肖同学 + 仅本人',
+        'payload' => [
+            'tenant_id' => 3,
+            'user_id' => 501,
+            'username' => 'student_xiao',
+            'role' => 'student',
+            'dept_id' => 2,
+            'team_id' => null,
+        ],
+        'expect' => 'WHERE tenant_id=3 AND (owner_id=501 OR created_by=501)',
+    ],
+    [
+        'name' => '7. 超级管理员指定查看租户2 + 租户级',
+        'payload' => [
+            'tenant_id' => 2,
+            'user_id' => 999,
+            'username' => 'super_admin',
+            'role' => 'super_admin',
+            'dept_id' => null,
+            'team_id' => null,
+            'data_scope' => 2,
+        ],
+        'expect' => 'WHERE tenant_id=2，仅智慧学习中心数据可见',
+    ],
+];
+
+$allPassed = true;
+
+foreach ($testCases as $case) {
+    echo str_repeat('-', 60) . "\n";
+    echo "▶ {$case['name']}\n";
+    echo "  预期: {$case['expect']}\n\n";
+
+    TenantContext::getInstance()->reset();
+    TenantContext::getInstance()->bootstrap($case['payload']);
+
+    $ctx = TenantContext::getInstance();
+    echo "  [上下文] 用户: {$ctx->getUsername()} | 角色: {$ctx->getRole()?->label()} | 租户: " . ($ctx->getTenantId() ?? 'ALL') . "\n";
+    echo "  [上下文] 数据范围: {$ctx->getDataScope()->label()}\n";
+
+    $qb = CourseModel::query()->where('status', 'published');
+    $debug = $qb->debug();
+
+    echo "  [生成SQL] {$debug['sql']}\n";
+    echo "  [参数] " . json_encode($debug['params'], JSON_UNESCAPED_UNICODE) . "\n";
+    echo "  [Scope] {$debug['scope']}\n";
+
+    $service = new DataVisibilityService();
+    $scopeSummary = $service->getScopeSummary();
+    echo "  [可用范围] ";
+    foreach ($scopeSummary['data_scope']['available'] as $s) {
+        echo "[{$s['value']}]{$s['label']} ";
+    }
+    echo "\n";
+
+    $courses = CourseModel::findAllByFilter();
+    echo "  [可见课程数] {$courses['total']} 条\n";
+    echo "  [可见课程]: ";
+    foreach ($courses['list'] as $c) {
+        echo "T{$c['tenant_id']}-#{$c['id']} ";
+    }
+    echo "\n";
+
+    echo "  ✅ 测试用例执行完成\n\n";
+}
+
+echo str_repeat('=', 60) . "\n";
+echo "▶ 数据可见范围断言测试\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$testAssertions = [
+    [
+        'setup_user' => ['user_id' => 202, 'role' => 'teacher', 'tenant_id' => 1, 'username' => '张老师'],
+        'resource' => ['tenant_id' => 1, 'owner_id' => 202, 'created_by' => 202, 'id' => 1001, 'title' => 'PHP高级编程实战'],
+        'action' => 'view',
+        'expected' => true,
+        'desc' => '张老师查看自己创建的课程#1001'
+    ],
+    [
+        'setup_user' => ['user_id' => 202, 'role' => 'teacher', 'tenant_id' => 1, 'username' => '张老师'],
+        'resource' => ['tenant_id' => 2, 'owner_id' => 401, 'created_by' => 401, 'id' => 1006, 'title' => 'Vue3企业级项目开发'],
+        'action' => 'view',
+        'expected' => false,
+        'desc' => '张老师尝试查看租户2的课程#1006（跨租户越权）'
+    ],
+    [
+        'setup_user' => ['user_id' => 102, 'role' => 'dept_head', 'tenant_id' => 1, 'username' => '李主任', 'dept_id' => 4],
+        'resource' => ['tenant_id' => 1, 'dept_id' => 7, 'owner_id' => 204, 'created_by' => 204, 'id' => 1010, 'title' => '高考语文阅读'],
+        'action' => 'modify',
+        'expected' => true,
+        'desc' => '李主任(语文部=4)修改下属中学语文组(dept=7)的课程#1010'
+    ],
+    [
+        'setup_user' => ['user_id' => 301, 'role' => 'teacher', 'tenant_id' => 1, 'username' => '周老师'],
+        'resource' => ['tenant_id' => 1, 'dept_id' => 4, 'owner_id' => 202, 'created_by' => 202, 'id' => 1001, 'title' => 'PHP高级编程'],
+        'action' => 'modify',
+        'expected' => false,
+        'desc' => '数学组周老师尝试修改张老师(语文)的课程#1001'
+    ],
+];
+
+$ctx = TenantContext::getInstance();
+$svc = new DataVisibilityService();
+
+$resolveDeptTree = function(?int $deptId): array {
+    if ($deptId === null) return [];
+    $allDepts = [
+        1 => ['id' => 1, 'parent_id' => null],
+        2 => ['id' => 2, 'parent_id' => 1],
+        3 => ['id' => 3, 'parent_id' => 1],
+        4 => ['id' => 4, 'parent_id' => 2],
+        5 => ['id' => 5, 'parent_id' => 2],
+        6 => ['id' => 6, 'parent_id' => 4],
+        7 => ['id' => 7, 'parent_id' => 4],
+    ];
+    $result = [$deptId];
+    $collectChildren = function(int $parentId) use ($allDepts, &$result, &$collectChildren) {
+        foreach ($allDepts as $dept) {
+            if ($dept['parent_id'] === $parentId) {
+                $result[] = $dept['id'];
+                $collectChildren($dept['id']);
+            }
+        }
+    };
+    $collectChildren($deptId);
+    return $result;
+};
+
+foreach ($testAssertions as $idx => $test) {
+    echo "测试 #" . ($idx + 1) . ": {$test['desc']}\n";
+
+    $deptId = $test['setup_user']['dept_id'] ?? null;
+    $deptChildren = $resolveDeptTree($deptId);
+
+    $ctx->reset();
+    $ctx->bootstrap([
+        'tenant_id' => $test['setup_user']['tenant_id'],
+        'user_id' => $test['setup_user']['user_id'],
+        'username' => $test['setup_user']['username'],
+        'role' => $test['setup_user']['role'],
+        'dept_id' => $deptId,
+        'dept_child_ids' => $deptChildren,
+        'team_id' => $test['setup_user']['team_id'] ?? null,
+    ]);
+
+    $result = $test['action'] === 'modify'
+        ? $svc->canModifyResource($test['resource'])
+        : $svc->canViewResource($test['resource']);
+
+    $status = $result === $test['expected'] ? '✅ PASS' : '❌ FAIL';
+    echo "  → 结果: " . ($result ? 'ALLOWED' : 'DENIED') . " (预期: " . ($test['expected'] ? 'ALLOWED' : 'DENIED') . ") → {$status}\n\n";
+
+    if ($result !== $test['expected']) {
+        $allPassed = false;
+    }
+}
+
+echo str_repeat('=', 60) . "\n";
+echo "▶ 跨角色层级过滤测试\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$roleHierarchyTest = [
+    'super_admin' => '超级管理员 → 所有下级角色均可见',
+    'tenant_admin' => '租户管理员 → 部门主管及以下可见，超级管理员不可见',
+    'dept_head' => '部门主管 → 团队负责人及以下可见',
+    'team_leader' => '团队负责人 → 讲师/学员可见',
+    'teacher' => '讲师 → 仅学员可见',
+    'student' => '学员 → 仅自己可见',
+];
+
+foreach ($roleHierarchyTest as $role => $desc) {
+    $ctx->reset();
+    $ctx->bootstrap([
+        'tenant_id' => 1,
+        'user_id' => 100,
+        'username' => 'test_' . $role,
+        'role' => $role,
+    ]);
+
+    $visible = $svc->buildCrossRoleFilter();
+    echo "{$desc}\n";
+    echo "  → 当前角色[{$role}] 可见角色: " . implode(', ', $visible) . "\n\n";
+}
+
+echo str_repeat('=', 60) . "\n";
+echo "▶ 【重点修复验证：保存→列表→详情一致性\n";
+echo str_repeat('=', 60) . "\n\n";
+
+CourseModel::resetData();
+
+$consistencyTests = [
+    [
+        'name' => '8.1 创建课程后列表可见性验证',
+        'user' => ['user_id' => 202, 'role' => 'teacher', 'tenant_id' => 1, 'username' => 'teacher_zhang', 'dept_id' => 2, 'team_id' => 101],
+        'action' => 'create',
+        'data' => ['title' => '测试课程-张老师自创', 'category' => '测试', 'status' => 'published'],
+        'expect_after' => 3,
+    ],
+    [
+        'name' => '8.2 修改课程后列表状态同步验证',
+        'user' => ['user_id' => 202, 'role' => 'teacher', 'tenant_id' => 1, 'username' => 'teacher_zhang', 'dept_id' => 2, 'team_id' => 101],
+        'action' => 'update',
+        'target_id' => 1001,
+        'data' => ['title' => 'PHP高级编程实战-已更新', 'status' => 'draft'],
+        'check_field' => 'status',
+        'expect_value' => 'draft',
+    ],
+    [
+        'name' => '8.3 findById 与列表数据一致(tenant隔离)',
+        'user' => ['user_id' => 101, 'role' => 'tenant_admin', 'tenant_id' => 1, 'username' => 'admin_huaxia', 'dept_id' => 1, 'team_id' => null],
+        'action' => 'compare',
+        'check_ids' => [1001, 1002, 1006],
+    ],
+    [
+        'name' => '8.4 跨租户越权 findById 应返回null',
+        'user' => ['user_id' => 101, 'role' => 'tenant_admin', 'tenant_id' => 1, 'username' => 'admin_huaxia', 'dept_id' => 1, 'team_id' => null],
+        'action' => 'denied_find',
+        'target_id' => 1006,
+    ],
+    [
+        'name' => '8.5 删除后列表应不再包含该记录',
+        'user' => ['user_id' => 101, 'role' => 'tenant_admin', 'tenant_id' => 1, 'username' => 'admin_huaxia', 'dept_id' => 1, 'team_id' => null],
+        'action' => 'delete',
+        'target_id' => 1003,
+    ],
+];
+
+$consistencyPassed = true;
+
+foreach ($consistencyTests as $idx => $test) {
+    echo "▶ {$test['name']}\n";
+
+    $deptId = $test['user']['dept_id'] ?? null;
+    $deptChildren = $resolveDeptTree($deptId);
+
+    $ctx->reset();
+    $ctx->bootstrap(array_merge($test['user'], [
+        'dept_child_ids' => $deptChildren,
+    ]));
+
+    $action = $test['action'];
+    $passed = false;
+
+    switch ($action) {
+        case 'create':
+            $beforeList = CourseModel::findAllByFilter();
+            $beforeCount = $beforeList['total'];
+            echo "  创建前可见数: {$beforeCount}\n";
+
+            $created = CourseModel::create($test['data']);
+            echo "  创建的课程: #{$created['id']} - {$created['title']} (tenant={$created['tenant_id']})\n";
+
+            $afterList = CourseModel::findAllByFilter();
+            $afterCount = $afterList['total'];
+            echo "  创建后可见数: {$afterCount}\n";
+
+            $foundInList = false;
+            foreach ($afterList['list'] as $c) {
+                if ($c['id'] == $created['id']) {
+                    $foundInList = true;
+                    break;
+                }
+            }
+
+            $detail = CourseModel::findById($created['id']);
+            $detailMatches = $detail && $detail['id'] == $created['id'] && $detail['title'] == $created['title'];
+
+            $passed = $foundInList && $detailMatches && $afterCount > $beforeCount;
+            echo "  列表中出现新数据: " . ($foundInList ? '✅' : '❌') . "\n";
+            echo "  详情接口返回一致: " . ($detailMatches ? '✅' : '❌') . "\n";
+            break;
+
+        case 'update':
+            $before = CourseModel::findById($test['target_id']);
+            echo "  修改前: title={$before['title']}, status={$before['status']}\n";
+
+            CourseModel::update($test['target_id'], $test['data']);
+
+            $afterDetail = CourseModel::findById($test['target_id']);
+            $list = CourseModel::findAllByFilter();
+            $afterList = null;
+            foreach ($list['list'] as $c) {
+                if ($c['id'] == $test['target_id']) {
+                    $afterList = $c;
+                    break;
+                }
+            }
+
+            $field = $test['check_field'];
+            $detailOk = $afterDetail && $afterDetail[$field] == $test['expect_value'];
+            $listOk = $afterList && $afterList[$field] == $test['expect_value'];
+
+            $fieldVal = $afterDetail[$field] ?? 'null';
+            $listFieldVal = $afterList[$field] ?? 'null';
+            echo "  修改后详情{$field}: {$fieldVal}\n";
+            echo "  修改后列表{$field}: {$listFieldVal}\n";
+
+            $passed = $detailOk && $listOk;
+            echo "  详情与列表一致: " . ($passed ? '✅' : '❌') . "\n";
+            break;
+
+        case 'compare':
+            $list = CourseModel::findAllByFilter();
+            $listIds = array_column($list['list'], 'id');
+            echo "  列表中课程ID: " . implode(', ', $listIds) . "\n";
+
+            $mismatch = [];
+            foreach ($test['check_ids'] as $cid) {
+                $detail = CourseModel::findById($cid);
+                $inList = in_array($cid, $listIds);
+                $detailExists = $detail !== null;
+                echo "  课程#{$cid}: 列表中=" . ($inList ? '是' : '否') . ", 详情接口=" . ($detailExists ? '有' : '无');
+                if ($inList !== $detailExists) {
+                    echo " ❌ 不一致";
+                    $mismatch[] = $cid;
+                } else {
+                    echo " ✅";
+                }
+                echo "\n";
+            }
+            $passed = empty($mismatch);
+            break;
+
+        case 'denied_find':
+            $detail = CourseModel::findById($test['target_id']);
+            $passed = $detail === null;
+            echo "  尝试查询越权课程#{$test['target_id']}\n";
+            echo "  结果: " . ($detail === null ? '返回null（正确拦截）✅' : '返回了数据（越权漏洞）❌') . "\n";
+            break;
+
+        case 'delete':
+            $before = CourseModel::findAllByFilter();
+            $beforeCount = $before['total'];
+            echo "  删除前: {$beforeCount} 条\n";
+
+            CourseModel::delete($test['target_id']);
+
+            $after = CourseModel::findAllByFilter();
+            $afterCount = $after['total'];
+            $stillExists = false;
+            foreach ($after['list'] as $c) {
+                if ($c['id'] == $test['target_id']) {
+                    $stillExists = true;
+                    break;
+                }
+            }
+            $detailExists = CourseModel::findById($test['target_id']) !== null;
+
+            echo "  删除后: {$afterCount} 条\n";
+            echo "  列表中已消失: " . (!$stillExists ? '✅' : '❌') . "\n";
+            echo "  详情已返回null: " . (!$detailExists ? '✅' : '❌') . "\n";
+            $passed = !$stillExists && !$detailExists && $afterCount < $beforeCount;
+            break;
+    }
+
+    $statusStr = $passed ? '✅ PASS' : '❌ FAIL';
+    echo "  → 结果: {$statusStr}\n\n";
+
+    if (!$passed) {
+        $consistencyPassed = false;
+        $allPassed = false;
+    }
+}
+
+echo str_repeat('=', 60) . "\n";
+echo "▶ 跨角色数据可见范围导出核对测试\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$auditTestCases = [
+    [
+        'name' => '9.1 超级管理员导出核对：所有资源应可见，无异常',
+        'payload' => [
+            'tenant_id' => null,
+            'user_id' => 999,
+            'username' => 'super_admin',
+            'role' => 'super_admin',
+            'dept_id' => null,
+            'team_id' => null,
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.2 租户管理员导出核对：仅本租户资源可见，跨租户应异常',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 101,
+            'username' => 'admin_huaxia',
+            'role' => 'tenant_admin',
+            'dept_id' => 1,
+            'team_id' => null,
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.3 普通讲师导出核对：仅本人资源可见',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 202,
+            'username' => 'teacher_zhang',
+            'role' => 'teacher',
+            'dept_id' => 2,
+            'team_id' => 101,
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.4 部门主管导出核对：部门及下级可见',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 102,
+            'username' => 'dept_chinese',
+            'role' => 'dept_head',
+            'dept_id' => 4,
+            'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+        'expect_status' => 'healthy',
+        'expect_anomaly_count' => 0,
+    ],
+    [
+        'name' => '9.5 范围不一致核对：讲师切换到租户级后核对',
+        'payload' => [
+            'tenant_id' => 1,
+            'user_id' => 202,
+            'username' => 'teacher_zhang',
+            'role' => 'teacher',
+            'dept_id' => 2,
+            'team_id' => 101,
+            'data_scope' => 2,
+        ],
+        'expect_has_scope_mismatch' => true,
+    ],
+];
+
+$allCoursesRaw = CourseModel::mockData();
+$auditTestResources = array_values($allCoursesRaw);
+
+$auditPassed = true;
+
+foreach ($auditTestCases as $idx => $test) {
+    echo "▶ {$test['name']}\n";
+
+    $deptId = $test['payload']['dept_id'] ?? null;
+    $deptChildren = $resolveDeptTree($deptId);
+
+    $ctx->reset();
+    $ctx->bootstrap(array_merge($test['payload'], [
+        'dept_child_ids' => $test['payload']['dept_child_ids'] ?? $deptChildren,
+    ]));
+
+    $auditResult = $svc->exportCrossRoleAudit($auditTestResources, 'course');
+
+    echo "  总资源数: {$auditResult['summary']['total_resources']}\n";
+    echo "  实际可见: {$auditResult['summary']['actual_visible_count']}\n";
+    echo "  预期可见: {$auditResult['summary']['expected_visible_count']}\n";
+    echo "  可见数一致: " . ($auditResult['summary']['visible_count_match'] ? '✅' : '❌') . "\n";
+    echo "  异常数: {$auditResult['summary']['anomaly_count']}\n";
+    echo "  严重异常: {$auditResult['summary']['error_count']}\n";
+    echo "  警告: {$auditResult['summary']['warning_count']}\n";
+    echo "  整体状态: {$auditResult['summary']['overall_status']}\n";
+
+    $testPassed = true;
+
+    if (isset($test['expect_status'])) {
+        if ($auditResult['summary']['overall_status'] !== $test['expect_status']) {
+            $testPassed = false;
+            echo "  ❌ 整体状态不符: 预期={$test['expect_status']}, 实际={$auditResult['summary']['overall_status']}\n";
+        }
+    }
+
+    if (isset($test['expect_anomaly_count'])) {
+        if ($auditResult['summary']['anomaly_count'] !== $test['expect_anomaly_count']) {
+            $testPassed = false;
+            echo "  ❌ 异常数不符: 预期={$test['expect_anomaly_count']}, 实际={$auditResult['summary']['anomaly_count']}\n";
+        }
+    }
+
+    if (isset($test['expect_has_scope_mismatch'])) {
+        if ($auditResult['context']['scope_mismatch'] !== $test['expect_has_scope_mismatch']) {
+            $testPassed = false;
+            echo "  ❌ 范围不一致检测不符: 预期=" . ($test['expect_has_scope_mismatch'] ? 'true' : 'false') . ", 实际=" . ($auditResult['context']['scope_mismatch'] ? 'true' : 'false') . "\n";
+        }
+    }
+
+    if (!empty($auditResult['anomalies'])) {
+        echo "  异常列表:\n";
+        foreach ($auditResult['anomalies'] as $a) {
+            echo "    - [{$a['severity']}] {$a['type']}: {$a['detail']}\n";
+        }
+    }
+
+    $statusStr = $testPassed ? '✅ PASS' : '❌ FAIL';
+    echo "  → 结果: {$statusStr}\n\n";
+
+    if (!$testPassed) {
+        $auditPassed = false;
+        $allPassed = false;
+    }
+}
+
+echo str_repeat('=', 60) . "\n";
+echo "▶ 跨角色筛选明细与列表一致性验证（核心修复）\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$consistencyCases = [
+    [
+        'name' => '10.1 超级管理员-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => null, 'user_id' => 999, 'username' => 'super_admin',
+            'role' => 'super_admin', 'dept_id' => null, 'team_id' => null,
+        ],
+    ],
+    [
+        'name' => '10.2 租户管理员-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 101, 'username' => 'admin_huaxia',
+            'role' => 'tenant_admin', 'dept_id' => 1, 'team_id' => null,
+        ],
+    ],
+    [
+        'name' => '10.3 部门主管-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 102, 'username' => 'dept_chinese',
+            'role' => 'dept_head', 'dept_id' => 4, 'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+    ],
+    [
+        'name' => '10.4 团队负责人-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 201, 'username' => 'team_leader_1',
+            'role' => 'team_leader', 'dept_id' => 4, 'team_id' => 101,
+            'team_member_ids' => [101, 202, 203, 204],
+        ],
+    ],
+    [
+        'name' => '10.5 普通讲师-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 202, 'username' => 'teacher_zhang',
+            'role' => 'teacher', 'dept_id' => 2, 'team_id' => 101,
+        ],
+    ],
+    [
+        'name' => '10.6 学员-跨角色筛选与明细完全一致',
+        'ctx' => [
+            'tenant_id' => 3, 'user_id' => 501, 'username' => 'student_xiao',
+            'role' => 'student', 'dept_id' => 2, 'team_id' => null,
+        ],
+    ],
+    [
+        'name' => '10.7 指定目标角色[teacher, student]-筛选与明细一致',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 102, 'username' => 'dept_chinese',
+            'role' => 'dept_head', 'dept_id' => 4, 'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+        'target_roles' => ['teacher', 'student'],
+    ],
+];
+
+$courseSvc = new \App\Module\Course\Service\CourseService();
+
+foreach ($consistencyCases as $case) {
+    echo "▶ {$case['name']}\n";
+
+    $ctx->reset();
+    $ctx->bootstrap($case['ctx']);
+
+    $targetRoles = $case['target_roles'] ?? [];
+
+    $report = $courseSvc->crossRoleViewReport($targetRoles);
+
+    echo "  visible_roles: " . implode(', ', $report['visible_roles']) . "\n";
+    echo "  visible_course_count: {$report['visible_course_count']}\n";
+    echo "  courses明细条数: " . count($report['courses']) . "\n";
+
+    $casePassed = true;
+
+    $countMatch = $report['visible_course_count'] === count($report['courses']);
+    if (!$countMatch) {
+        echo "  ❌ 可见条数与明细条数不一致: count={$report['visible_course_count']}, 明细=" . count($report['courses']) . "\n";
+        $casePassed = false;
+    } else {
+        echo "  ✅ 可见条数与明细条数一致\n";
+    }
+
+    if (isset($report['role_breakdown'])) {
+        $breakdownRoles = array_column($report['role_breakdown'], 'role');
+        $visibleRolesSet = $report['visible_roles'];
+        sort($breakdownRoles);
+        sort($visibleRolesSet);
+        if ($breakdownRoles === $visibleRolesSet) {
+            echo "  ✅ role_breakdown 与 visible_roles 完全匹配\n";
+        } else {
+            echo "  ❌ role_breakdown 与 visible_roles 不匹配: breakdown=" . implode(',', $breakdownRoles) . " vs visible=" . implode(',', $visibleRolesSet) . "\n";
+            $casePassed = false;
+        }
+
+        $totalFromBreakdown = array_sum(array_column($report['role_breakdown'], 'count'));
+        if ($totalFromBreakdown === $report['visible_course_count']) {
+            echo "  ✅ role_breakdown 合计数与 visible_course_count 一致\n";
+        } else {
+            echo "  ❌ role_breakdown 合计数与 visible_course_count 不一致: breakdown_total={$totalFromBreakdown}, count={$report['visible_course_count']}\n";
+            $casePassed = false;
+        }
+    }
+
+    $badCourses = [];
+    foreach ($report['courses'] as $course) {
+        if (!in_array($course['owner_role'], $report['visible_roles'], true)) {
+            $badCourses[] = $course['course_id'];
+        }
+    }
+    if (empty($badCourses)) {
+        echo "  ✅ 所有课程明细的 owner_role 均在 visible_roles 内\n";
+    } else {
+        echo "  ❌ 以下课程 owner_role 不在 visible_roles 内: #" . implode(', #', $badCourses) . "\n";
+        $casePassed = false;
+    }
+
+    echo "  → 结果: " . ($casePassed ? '✅ PASS' : '❌ FAIL') . "\n\n";
+    if (!$casePassed) $allPassed = false;
+}
+
+echo str_repeat('=', 60) . "\n";
+echo "▶ 审核回写状态流转测试\n";
+echo str_repeat('=', 60) . "\n\n";
+
+$writeBackCases = [
+    [
+        'name' => '11.1 讲师scope被切到租户级→审核检测→回写修正→状态正确流转',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 202, 'username' => 'teacher_zhang',
+            'role' => 'teacher', 'dept_id' => 2, 'team_id' => 101,
+            'data_scope' => 2,
+        ],
+        'expect_before_mismatch' => true,
+        'expect_fix_corrected' => true,
+        'expect_scope_after' => DataScopeLevel::SELF->value,
+        'expect_re_audit_healthy' => true,
+    ],
+    [
+        'name' => '11.2 部门主管scope正常→审核无异常→回写无需修正',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 102, 'username' => 'dept_chinese',
+            'role' => 'dept_head', 'dept_id' => 4, 'team_id' => 101,
+            'dept_child_ids' => [4, 6, 7],
+        ],
+        'expect_before_mismatch' => false,
+        'expect_fix_corrected' => false,
+    ],
+    [
+        'name' => '11.3 团队负责人scope被切到全部→审核检测→回写修正到TEAM',
+        'ctx' => [
+            'tenant_id' => 1, 'user_id' => 201, 'username' => 'team_leader_1',
+            'role' => 'team_leader', 'dept_id' => 4, 'team_id' => 101,
+            'team_member_ids' => [101, 202, 203, 204],
+            'data_scope' => 1,
+        ],
+        'expect_before_mismatch' => true,
+        'expect_fix_corrected' => true,
+        'expect_scope_after' => DataScopeLevel::TEAM->value,
+        'expect_re_audit_healthy' => true,
+    ],
+];
+
+$auditResources = array_values(CourseModel::mockData());
+
+foreach ($writeBackCases as $case) {
+    echo "▶ {$case['name']}\n";
+
+    $ctx->reset();
+    $ctx->bootstrap($case['ctx']);
+
+    $beforeScope = $ctx->getDataScope()->value;
+    $beforeScopeLabel = $ctx->getDataScope()->label();
+    $roleDefaultScope = $ctx->getRole()?->defaultDataScope()->value;
+    $roleDefaultScopeLabel = $ctx->getRole()?->defaultDataScope()->label();
+
+    echo "  修正前: scope={$beforeScopeLabel}({$beforeScope}), 角色默认={$roleDefaultScopeLabel}({$roleDefaultScope})\n";
+
+    $auditOutput = $svc->exportCrossRoleAudit($auditResources, 'course');
+    $scopeMismatch = $auditOutput['context']['scope_mismatch'];
+    echo "  审核scope_mismatch: " . ($scopeMismatch ? 'true' : 'false') . "\n";
+
+    $casePassed = true;
+
+    if (isset($case['expect_before_mismatch'])) {
+        if ($scopeMismatch !== $case['expect_before_mismatch']) {
+            echo "  ❌ 审核scope_mismatch不符: 预期=" . ($case['expect_before_mismatch'] ? 'true' : 'false') . ", 实际=" . ($scopeMismatch ? 'true' : 'false') . "\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 审核scope_mismatch检测正确\n";
+        }
+    }
+
+    $fixOutput = $svc->applyCrossRoleAuditFix($auditOutput);
+    $scopeFixCorrected = $fixOutput['scope_fix']['corrected'] ?? false;
+    echo "  回写修正: corrected=" . ($scopeFixCorrected ? 'true' : 'false') . "\n";
+
+    if (isset($case['expect_fix_corrected'])) {
+        if ($scopeFixCorrected !== $case['expect_fix_corrected']) {
+            echo "  ❌ 回写修正结果不符: 预期=" . ($case['expect_fix_corrected'] ? 'true' : 'false') . ", 实际=" . ($scopeFixCorrected ? 'true' : 'false') . "\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 回写修正结果正确\n";
+        }
+    }
+
+    $afterScope = $ctx->getDataScope()->value;
+    $afterScopeLabel = $ctx->getDataScope()->label();
+    echo "  修正后: scope={$afterScopeLabel}({$afterScope})\n";
+
+    if (isset($case['expect_scope_after'])) {
+        if ($afterScope !== $case['expect_scope_after']) {
+            echo "  ❌ 修正后scope不符: 预期={$case['expect_scope_after']}, 实际={$afterScope}\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 修正后scope正确\n";
+        }
+    }
+
+    echo "  isScopeCorrected: " . ($ctx->isScopeCorrected() ? 'true' : 'false') . "\n";
+    echo "  lastAuditScope: " . ($ctx->getLastAuditScope()?->label() ?? 'null') . "\n";
+
+    if ($scopeFixCorrected) {
+        if (!$ctx->isScopeCorrected()) {
+            echo "  ❌ isScopeCorrected 应为 true\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ isScopeCorrected 标记正确\n";
+        }
+
+        if ($ctx->getLastAuditScope()?->value !== $case['ctx']['data_scope'] ?? DataScopeLevel::SELF->value) {
+            if (isset($case['ctx']['data_scope'])) {
+                echo "  ❌ lastAuditScope 未记录修正前的scope\n";
+                $casePassed = false;
+            }
+        } else {
+            echo "  ✅ lastAuditScope 记录了修正前scope\n";
+        }
+    }
+
+    if (isset($case['expect_re_audit_healthy']) && $case['expect_re_audit_healthy']) {
+        $reAuditResources = [];
+        foreach ($auditOutput['audited_resources'] as $ar) {
+            $reAuditResources[] = [
+                'id' => $ar['id'],
+                'title' => $ar['title'],
+                'owner_id' => $ar['owner_id'],
+                'tenant_id' => $ar['tenant_id'],
+                'dept_id' => $ar['dept_id'],
+            ];
+        }
+        $reAudit = $svc->exportCrossRoleAudit($reAuditResources, 'course');
+        $reStatus = $reAudit['summary']['overall_status'];
+        echo "  修正后重新审核状态: {$reStatus}\n";
+        if ($reStatus !== 'healthy') {
+            echo "  ❌ 修正后重新审核状态应为healthy\n";
+            $casePassed = false;
+        } else {
+            echo "  ✅ 修正后重新审核状态正确\n";
+        }
+    }
+
+    echo "  → 结果: " . ($casePassed ? '✅ PASS' : '❌ FAIL') . "\n\n";
+    if (!$casePassed) $allPassed = false;
+}
+
+echo str_repeat('=', 60) . "\n";
+echo $allPassed ? "🎉 全部测试通过！包括审核回写状态流转！\n" : "⚠️ 存在测试失败，请检查实现\n";
+echo str_repeat('=', 60) . "\n";
+
+echo "\n📌 架构总结：\n";
+echo "   ┌─ TenantMiddleware: 解析令牌 → 提取租户/用户 → 校验X-Tenant-Id合法性\n";
+echo "   │    ↓\n";
+echo "   ├─ TenantContext(Singleton): 持有当前请求租户上下文 + 部门树 + 团队成员\n";
+echo "   │    ↓\n";
+echo "   ├─ TenantScope: 根据上下文自动生成 WHERE 条件 (tenant_id + 数据范围)\n";
+echo "   │    ↓\n";
+echo "   ├─ QueryBuilder: 在toSql/getParams时自动应用TenantScope注入条件\n";
+echo "   │    ↓\n";
+echo "   ├─ InMemoryDataStore: 内存数据源，写操作真正持久化，确保列表详情同源\n";
+echo "   │    ↓\n";
+echo "   └─ DataVisibilityService: 资源级权限断言 + 跨角色层级串联\n";
+echo "\n";
+echo "🔧 修复要点：\n";
+echo "   1. 列表和详情查询使用同一套 InMemoryDataStore 数据源\n";
+echo "   2. findById 通过 DataVisibilityService 校验，杜绝越权\n";
+echo "   3. 创建/更新/删除真正写入数据源，刷新后状态一致\n";
+echo "   4. 前端保存后强制回读列表，保证前端状态同步\n";
+echo "\n";
