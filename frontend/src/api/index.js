@@ -46,6 +46,14 @@ export const courseService = {
   delete(id) {
     return tenantApi.delete(`/courses/${id}`)
   },
+
+  getDataScopeAudit(params) {
+    return tenantApi.get('/courses-data-scope-audit', { params })
+  },
+
+  exportDataScopeAudit(params) {
+    return tenantApi.get('/courses-export-data-scope-audit', { params })
+  },
 }
 
 export const deptService = {

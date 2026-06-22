@@ -15,6 +15,8 @@ Route::middleware(['auth:api', TenantMiddleware::class])->group(function () {
 
     Route::apiResource('courses', App\Http\Controllers\CourseController::class);
     Route::get('courses-all', [App\Http\Controllers\CourseController::class, 'all']);
+    Route::get('courses-data-scope-audit', [App\Http\Controllers\CourseController::class, 'dataScopeAudit']);
+    Route::get('courses-export-data-scope-audit', [App\Http\Controllers\CourseController::class, 'exportDataScopeAudit']);
 
     Route::apiResource('depts', App\Http\Controllers\DeptController::class);
     Route::get('depts-tree', [App\Http\Controllers\DeptController::class, 'tree']);
