@@ -13,53 +13,93 @@ class DataScopeScope implements Scope
 {
     protected $config = [];
 
+    protected static $appliedWarnings = [];
+
     public function __construct(array $config = [])
     {
         $this->config = array_merge([
             'user_id_column' => 'created_by',
             'dept_id_column' => 'dept_id',
             'tenant_id_column' => 'tenant_id',
+            'resource' => null,
         ], $config);
     }
 
     public function apply(Builder $builder, Model $model)
     {
         if (TenantContext::isSuperAdmin()) {
+            self::recordScopeApplied($model, DataScopeEnum::ALL, '超级管理员，跳过过滤');
             return;
         }
 
         $user = TenantContext::getUser();
         if (empty($user)) {
+            self::recordScopeApplied($model, null, '用户未登录，跳过过滤');
             return;
         }
 
-        $dataScope = $user->data_scope ?? DataScopeEnum::SELF;
+        $declaredScope = $user->data_scope ?? DataScopeEnum::SELF;
+        $actualScope = $declaredScope;
+        $downgradeReason = null;
 
-        switch ($dataScope) {
+        switch ($declaredScope) {
             case DataScopeEnum::ALL:
                 $this->applyAllScope($builder, $model, $user);
                 break;
 
             case DataScopeEnum::TENANT:
-                $this->applyTenantScope($builder, $model, $user);
+                $actualScope = $this->applyTenantScopeWithValidation($builder, $model, $user, $declaredScope);
+                if ($actualScope !== $declaredScope) {
+                    $downgradeReason = "租户信息不完整";
+                }
                 break;
 
             case DataScopeEnum::DEPARTMENT:
-                $this->applyDeptScope($builder, $model, $user);
+                $actualScope = $this->applyDeptScopeWithValidation($builder, $model, $user, $declaredScope);
+                if ($actualScope !== $declaredScope) {
+                    $downgradeReason = "未分配部门";
+                }
                 break;
 
             case DataScopeEnum::DEPARTMENT_AND_SUB:
-                $this->applyDeptAndSubScope($builder, $model, $user);
+                $actualScope = $this->applyDeptAndSubScopeWithValidation($builder, $model, $user, $declaredScope);
+                if ($actualScope !== $declaredScope) {
+                    $downgradeReason = "部门数据不完整";
+                }
                 break;
 
             case DataScopeEnum::CUSTOM:
-                $this->applyCustomScope($builder, $model, $user);
+                $actualScope = $this->applyCustomScopeWithValidation($builder, $model, $user, $declaredScope);
+                if ($actualScope !== $declaredScope) {
+                    $downgradeReason = "自定义部门为空";
+                }
                 break;
 
             case DataScopeEnum::SELF:
             default:
+                $actualScope = DataScopeEnum::SELF;
                 $this->applySelfScope($builder, $model, $user);
                 break;
+        }
+
+        if ($downgradeReason) {
+            self::recordScopeApplied(
+                $model,
+                $actualScope,
+                sprintf(
+                    '范围降级：%s → %s（%s）',
+                    DataScopeEnum::label($declaredScope),
+                    DataScopeEnum::label($actualScope),
+                    $downgradeReason
+                ),
+                [
+                    'from' => $declaredScope,
+                    'to' => $actualScope,
+                    'reason' => $downgradeReason,
+                ]
+            );
+        } else {
+            self::recordScopeApplied($model, $actualScope, DataScopeEnum::label($actualScope));
         }
     }
 
@@ -67,41 +107,72 @@ class DataScopeScope implements Scope
     {
     }
 
-    protected function applyTenantScope(Builder $builder, Model $model, $user): void
+    protected function applyTenantScopeWithValidation(Builder $builder, Model $model, $user, int $declaredScope): int
     {
-        $tenantId = $user->tenant_id;
+        $tenantId = $user->tenant_id ?? null;
         if ($tenantId) {
             $builder->where($model->qualifyColumn($this->config['tenant_id_column']), $tenantId);
+            return $declaredScope;
         }
+        $this->applySelfScope($builder, $model, $user);
+        return DataScopeEnum::SELF;
     }
 
-    protected function applyDeptScope(Builder $builder, Model $model, $user): void
+    protected function applyDeptScopeWithValidation(Builder $builder, Model $model, $user, int $declaredScope): int
     {
-        $deptId = $user->dept_id;
+        $deptId = $user->dept_id ?? null;
         if ($deptId) {
             $builder->where($model->qualifyColumn($this->config['dept_id_column']), $deptId);
-        } else {
-            $this->applySelfScope($builder, $model, $user);
+            return $declaredScope;
         }
+        $this->applySelfScope($builder, $model, $user);
+        return DataScopeEnum::SELF;
     }
 
-    protected function applyDeptAndSubScope(Builder $builder, Model $model, $user): void
+    protected function applyDeptAndSubScopeWithValidation(Builder $builder, Model $model, $user, int $declaredScope): int
     {
-        $deptId = $user->dept_id;
+        $deptId = $user->dept_id ?? null;
         if (!$deptId) {
             $this->applySelfScope($builder, $model, $user);
-            return;
+            return DataScopeEnum::SELF;
         }
 
         $subDeptIds = $this->getSubDeptIds($deptId);
-        $allDeptIds = array_merge([$deptId], $subDeptIds);
+        if (empty($subDeptIds)) {
+            $builder->where(function (Builder $query) use ($model, $deptId, $user) {
+                $query->where($model->qualifyColumn($this->config['dept_id_column']), $deptId);
+                if (!empty($user->id)) {
+                    $query->orWhere($model->qualifyColumn($this->config['user_id_column']), $user->id);
+                }
+            });
+            return DataScopeEnum::DEPARTMENT;
+        }
 
+        $allDeptIds = array_merge([$deptId], $subDeptIds);
         $builder->where(function (Builder $query) use ($model, $allDeptIds, $user) {
             $query->whereIn($model->qualifyColumn($this->config['dept_id_column']), $allDeptIds);
-            if ($user->id) {
+            if (!empty($user->id)) {
                 $query->orWhere($model->qualifyColumn($this->config['user_id_column']), $user->id);
             }
         });
+        return $declaredScope;
+    }
+
+    protected function applyCustomScopeWithValidation(Builder $builder, Model $model, $user, int $declaredScope): int
+    {
+        $deptIds = $this->getCustomDeptIds($user);
+        if (empty($deptIds)) {
+            $this->applySelfScope($builder, $model, $user);
+            return DataScopeEnum::SELF;
+        }
+
+        $builder->where(function (Builder $query) use ($model, $deptIds, $user) {
+            $query->whereIn($model->qualifyColumn($this->config['dept_id_column']), $deptIds);
+            if (!empty($user->id)) {
+                $query->orWhere($model->qualifyColumn($this->config['user_id_column']), $user->id);
+            }
+        });
+        return $declaredScope;
     }
 
     protected function applySelfScope(Builder $builder, Model $model, $user): void
@@ -109,28 +180,12 @@ class DataScopeScope implements Scope
         $builder->where($model->qualifyColumn($this->config['user_id_column']), $user->id);
     }
 
-    protected function applyCustomScope(Builder $builder, Model $model, $user): void
-    {
-        $deptIds = $this->getCustomDeptIds($user);
-
-        if (empty($deptIds)) {
-            $this->applySelfScope($builder, $model, $user);
-            return;
-        }
-
-        $builder->where(function (Builder $query) use ($model, $deptIds, $user) {
-            $query->whereIn($model->qualifyColumn($this->config['dept_id_column']), $deptIds);
-            if ($user->id) {
-                $query->orWhere($model->qualifyColumn($this->config['user_id_column']), $user->id);
-            }
-        });
-    }
-
     protected function getSubDeptIds(int $parentDeptId): array
     {
         try {
             $depts = DB::table('sys_dept')
                 ->select('id', 'parent_id')
+                ->where('tenant_id', TenantContext::getTenantId())
                 ->get();
 
             $result = [];
@@ -175,5 +230,34 @@ class DataScopeScope implements Scope
         $builder->macro('withDataScope', function (Builder $builder, $config = []) {
             return $builder->withGlobalScope(get_class($this), new self($config));
         });
+    }
+
+    public static function recordScopeApplied(Model $model, ?int $scope, string $note, array $extra = []): void
+    {
+        $key = get_class($model);
+        self::$appliedWarnings[$key] = [
+            'scope' => $scope,
+            'scope_label' => $scope !== null ? DataScopeEnum::label($scope) : '未设置',
+            'note' => $note,
+            'extra' => $extra,
+            'applied_at' => microtime(true),
+        ];
+    }
+
+    public static function flushAppliedWarnings(): array
+    {
+        $warnings = self::$appliedWarnings;
+        self::$appliedWarnings = [];
+        return $warnings;
+    }
+
+    public static function hasWarnings(): bool
+    {
+        foreach (self::$appliedWarnings as $info) {
+            if (!empty($info['extra']['from']) && $info['extra']['from'] !== $info['extra']['to']) {
+                return true;
+            }
+        }
+        return false;
     }
 }

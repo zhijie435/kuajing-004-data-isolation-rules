@@ -2,6 +2,7 @@
 
 namespace App\Observers;
 
+use App\Exceptions\TenantIsolationException;
 use App\Services\TenantContext;
 use Illuminate\Database\Eloquent\Model;
 
@@ -16,6 +17,8 @@ class TenantModelObserver
             $tenantId = TenantContext::getTenantId();
             if ($tenantId) {
                 $model->{$tenantColumn} = $tenantId;
+            } else {
+                throw TenantIsolationException::contextUninitialized(get_class($model) . '::creating');
             }
         }
 
@@ -32,14 +35,28 @@ class TenantModelObserver
         $tenantColumn = $model::$tenantColumn ?? 'tenant_id';
 
         if ($model->isDirty($tenantColumn)) {
-            $originalTenantId = $model->getOriginal($tenantColumn);
-            $currentTenantId = TenantContext::getTenantId();
+            $originalTenantId = (string) $model->getOriginal($tenantColumn);
+            $newTenantId = (string) $model->{$tenantColumn};
+            $currentTenantId = (string) TenantContext::getTenantId();
 
-            if (!TenantContext::isSuperAdmin() && $originalTenantId != $currentTenantId) {
-                throw new \Illuminate\Database\QueryException(
-                    'UPDATE',
-                    [],
-                    new \Exception('禁止修改数据所属租户')
+            if (!TenantContext::isSuperAdmin() && $originalTenantId !== $newTenantId) {
+                throw TenantIsolationException::tenantModifyForbidden($originalTenantId, $newTenantId);
+            }
+
+            if (!TenantContext::isSuperAdmin() && $newTenantId !== $currentTenantId) {
+                throw TenantIsolationException::tenantMismatch($currentTenantId, $newTenantId);
+            }
+        }
+
+        $userIdColumn = $model::$createdByColumn ?? 'created_by';
+        if ($model->isDirty($userIdColumn) && !TenantContext::isSuperAdmin()) {
+            $originalCreator = (string) $model->getOriginal($userIdColumn);
+            $newCreator = (string) $model->{$userIdColumn};
+            if ($originalCreator !== '' && $originalCreator !== $newCreator) {
+                throw TenantIsolationException::dataScopeDenied(
+                    '修改创建人',
+                    class_basename($model),
+                    ['SCOPE_SUPER_ADMIN']
                 );
             }
         }
@@ -47,15 +64,30 @@ class TenantModelObserver
 
     public function deleting(Model $model): void
     {
-        $tenantColumn = $model::$tenantColumn ?? 'tenant_id';
-        $currentTenantId = TenantContext::getTenantId();
+        if (TenantContext::isSuperAdmin()) {
+            return;
+        }
 
-        if (!TenantContext::isSuperAdmin() && $model->{$tenantColumn} != $currentTenantId) {
-            throw new \Illuminate\Database\QueryException(
-                'DELETE',
-                [],
-                new \Exception('禁止删除非本租户数据')
-            );
+        $tenantColumn = $model::$tenantColumn ?? 'tenant_id';
+        $dataTenantId = (string) $model->{$tenantColumn};
+        $currentTenantId = (string) TenantContext::getTenantId();
+
+        if ($dataTenantId !== $currentTenantId) {
+            throw TenantIsolationException::tenantDeleteForbidden($dataTenantId, $currentTenantId);
+        }
+
+        $userIdColumn = $model::$createdByColumn ?? 'created_by';
+        if (isset($model->{$userIdColumn})) {
+            $dataCreator = (string) $model->{$userIdColumn};
+            $currentUserId = (string) TenantContext::getUserId();
+
+            if ($dataCreator !== '' && $dataCreator !== $currentUserId) {
+                throw TenantIsolationException::dataScopeDenied(
+                    '删除',
+                    class_basename($model),
+                    ['SCOPE_DEPARTMENT_AND_SUB']
+                );
+            }
         }
     }
 
